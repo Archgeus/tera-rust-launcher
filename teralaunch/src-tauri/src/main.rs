@@ -1001,22 +1001,20 @@ async fn login(username: String, password: String) -> Result<String, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    // --- Obtener URLs ---
-    
-    // 1. Obtener la URL completa para LoginAction (ej: "http://.../launcher/LoginAction")
+    // --- Get URLs ---
+
+    // 1. Get the full URL for LoginAction (e.g., "http://.../launcher/LoginAction")
     let login_url = get_config_value("LOGIN_ACTION_URL");
 
-    // 2. Derivar la URL base eliminando el endpoint específico.
-    //    (ej: "http://.../launcher/LoginAction" -> "http://...")
+    // 2. Derive the base URL by removing the specific endpoint.
     let base_url = login_url.trim_end_matches("/launcher/LoginAction").to_string();
 
 
     // --- Step 1: POST to /launcher/LoginAction ---
-    // Usar la 'login_url' completa directamente
     let payload = format!("login={}&password={}", username, password);
 
     let login_res = client
-        .post(&login_url) // Usar la URL completa leída del config
+        .post(&login_url)
         .body(payload)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
@@ -1042,7 +1040,6 @@ async fn login(username: String, password: String) -> Result<String, String> {
     let success_msg = login_body.msg.clone();
 
     // --- Step 2: GET /launcher/GetAccountInfoAction ---
-    // Construir las siguientes URLs usando la 'base_url' derivada
     let account_info_url = format!("{}/launcher/GetAccountInfoAction", base_url);
     let account_info: AccountInfoResponse = client
         .get(&account_info_url)
