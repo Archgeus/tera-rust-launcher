@@ -31,5 +31,9 @@ For a comprehensive guide on how to set up and use this launcher, please refer t
 
 [Tera Rust Launcher Tutorial on Ragezone](https://forum.ragezone.com/threads/teralauncher-100-02-advanced-game-launcher-with-tauri-js.1231496/)
 
+## Credits
+Original Author: [TheNak976](https://github.com/TheNak976/tera-rust-launcher)  
+TERA Api: [JKQ](https://github.com/justkeepquiet/tera-api)
+
 ## Disclaimer
 This project is for educational purposes only. Always respect the terms of service of the game and its publishers.
