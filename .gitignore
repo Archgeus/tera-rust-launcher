@@ -1,2 +1,5 @@
 
 /teralib/target
+/teralaunch/node_modules
+/teralaunch/target
+
