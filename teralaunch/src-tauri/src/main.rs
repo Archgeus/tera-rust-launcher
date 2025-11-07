@@ -81,6 +81,10 @@ lazy_static! {
     });
 }
 
+lazy_static! {
+    static ref LAUNCHER_BASE_URL: String = get_config_value("LAUNCHER_ACTION_URL");
+}
+
 // Struct for the initial /launcher/LoginAction response
 #[derive(Deserialize)]
 struct InitialLoginResponse {
@@ -117,6 +121,21 @@ struct AuthKeyResponse {
 struct CharCountResponse {
     #[serde(rename = "CharacterCount")]
     character_count: String,
+}
+
+// Struct for the /launcher/GetMaintenanceStatusAction response
+#[derive(Deserialize, Debug, Clone, Serialize)]
+struct MaintenanceResponse {
+    #[serde(rename = "Return")]
+    return_value: bool,
+    #[serde(rename = "ReturnCode")]
+    return_code: i32,
+    #[serde(rename = "Msg")]
+    msg: String,
+    #[serde(rename = "StartTime")]
+    start_time: Option<u64>,
+    #[serde(rename = "EndTime")]
+    end_time: Option<u64>,
 }
 
 // This struct combines all info into the format the frontend expects (same as old LoginResponse)
@@ -341,7 +360,58 @@ fn load_config() -> Result<(PathBuf, String), String> {
     Ok(())
 } */
 
+async fn get_maintenance_status() -> Result<MaintenanceResponse, String> { 
+    let client = reqwest::Client::new();
+    let base_url = &*LAUNCHER_BASE_URL; 
+    let maintenance_url = format!("{}/launcher/GetMaintenanceStatusAction", base_url);
 
+    let res = client
+        .get(&maintenance_url)
+        .send().await
+        .map_err(|e| format!("Failed to connect to maintenance server: {}", e))?;
+
+    if !res.status().is_success() {
+        return Err(format!("Maintenance check request failed with status: {}", res.status()));
+    }
+
+    let maintenance_body: MaintenanceResponse = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse maintenance response: {}", e))?;
+
+    if !maintenance_body.return_value {
+        return Err(format!("Maintenance check API error: {}", maintenance_body.msg));
+    }
+
+    Ok(maintenance_body)
+}
+
+#[tauri::command]
+async fn check_maintenance_and_notify(window: tauri::Window) -> Result<bool, String> {
+    match get_maintenance_status().await {
+        Ok(response) => {
+            let is_maintenance = response.start_time.is_some() || response.end_time.is_some();
+
+            if is_maintenance {
+                // Emitir el evento con los detalles completos del mantenimiento para el modal
+                let payload = serde_json::to_value(&response)
+                    .unwrap_or(json!({"msg": "Mantenimiento activo"}));
+
+                if let Err(e) = window.emit("maintenance_active", payload) {
+                    error!("Failed to emit maintenance_active event: {:?}", e);
+                }
+            }
+
+            // Devolver 'true' si hay mantenimiento, 'false' si no lo hay
+            Ok(is_maintenance)
+        }
+        Err(e) => {
+            error!("Error checking maintenance status: {:?}", e);
+            // Devolver un error específico para que el frontend lo pueda manejar como un problema de red
+            Err(format!("ERROR_NETWORK_CHECK: {}", e))
+        }
+    }
+}
 
 
 #[tauri::command]
@@ -945,6 +1015,7 @@ async fn handle_launch_game(
     Ok("Game launch initiated".to_string())
 }
 
+
 #[tauri::command]
 fn get_language_from_config() -> Result<String, String> {
     info!("Attempting to read language from config file");
@@ -1001,20 +1072,20 @@ async fn login(username: String, password: String) -> Result<String, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    // --- Get URLs ---
+    // --- Get URLs (UPDATED LOGIC) ---
 
-    // 1. Get the full URL for LoginAction (e.g., "http://.../launcher/LoginAction")
-    let login_url = get_config_value("LOGIN_ACTION_URL");
+    // 1. (NEW) Get the base URL from the config (e.g., "http://127.0.0.1:8090")
+    // Make sure your get_config_value() function does not add a trailing slash.
+    let base_url = &*LAUNCHER_BASE_URL;
 
-    // 2. Derive the base URL by removing the specific endpoint.
-    let base_url = login_url.trim_end_matches("/launcher/LoginAction").to_string();
-
+    // 2. (NEW) Build the full login URL
+    let login_url = format!("{}/launcher/LoginAction", base_url);
 
     // --- Step 1: POST to /launcher/LoginAction ---
     let payload = format!("login={}&password={}", username, password);
 
     let login_res = client
-        .post(&login_url)
+        .post(&login_url) // Uses the constructed login_url
         .body(payload)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
@@ -1035,11 +1106,12 @@ async fn login(username: String, password: String) -> Result<String, String> {
         // Return the error message from the API (e.g., "Invalid password")
         return Err(login_body.msg);
     }
-    
+
     // Store the success message to return later
     let success_msg = login_body.msg.clone();
 
     // --- Step 2: GET /launcher/GetAccountInfoAction ---
+    // (This logic now works correctly using the 'base_url' from config)
     let account_info_url = format!("{}/launcher/GetAccountInfoAction", base_url);
     let account_info: AccountInfoResponse = client
         .get(&account_info_url)
@@ -1051,6 +1123,7 @@ async fn login(username: String, password: String) -> Result<String, String> {
         .map_err(|e| format!("Failed to parse account info: {}", e))?;
 
     // --- Step 3: GET /launcher/GetAuthKeyAction ---
+    // (This logic now works correctly using the 'base_url' from config)
     let auth_key_url = format!("{}/launcher/GetAuthKeyAction", base_url);
     let auth_key: AuthKeyResponse = client
         .get(&auth_key_url)
@@ -1062,6 +1135,7 @@ async fn login(username: String, password: String) -> Result<String, String> {
         .map_err(|e| format!("Failed to parse auth key: {}", e))?;
 
     // --- Step 4: GET /launcher/GetCharacterCountAction ---
+    // (This logic now works correctly using the 'base_url' from config)
     let char_count_url = format!("{}/launcher/GetCharacterCountAction", base_url);
     let char_count: CharCountResponse = client
         .get(&char_count_url)
@@ -1105,6 +1179,7 @@ async fn handle_logout(state: tauri::State<'_, GameState>) -> Result<(), String>
     Ok(())
 }
 
+
 #[tauri::command]
 async fn check_server_connection() -> Result<bool, String> {
     let client = Client::builder()
@@ -1118,6 +1193,10 @@ async fn check_server_connection() -> Result<bool, String> {
     }
 }
 
+#[tauri::command]
+fn get_client_version() -> Result<String, String> {
+    Ok(get_config_value("CLIENT_VERSION"))
+}
 
 fn main() {
 
@@ -1195,6 +1274,8 @@ fn main() {
                 check_server_connection,
                 check_update_required,
                 download_all_files,
+                get_client_version,
+                check_maintenance_and_notify,
             ]
         )
         .run(tauri::generate_context!())

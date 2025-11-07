@@ -1366,3 +1366,71 @@ input[type="text"]::placeholder {
   margin-bottom: 20px;
   color: #3498db;
 }
+
+.custom-modal-content {
+    position: relative;
+    background-color: #1a1a1a; 
+    border: 1px solid #444; 
+    border-radius: 4px;
+    padding: 25px 35px;
+    width: 350px;
+    box-shadow: 0 0 15px rgba(0, 0, 0, 0.7);
+    color: #e0e0e0;
+    text-align: center;
+    font-family: inherit; 
+}
+
+.custom-modal-backdrop {
+    position: fixed; 
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 99999;
+    background-color: rgba(0, 0, 0, 0.9); 
+    display: flex; 
+    justify-content: center; 
+    align-items: center;
+}
+
+.modal-title {
+    color: #ffaa00; 
+    margin-top: 0;
+    font-size: 1.5em;
+    font-weight: bold;
+    margin-bottom: 15px;
+}
+
+.maintenance-message {
+    margin-bottom: 25px;
+    font-size: 0.95em;
+}
+
+.maintenance-schedule {
+    margin-bottom: 20px;
+    padding-top: 15px;
+    border-top: 1px solid #333;
+}
+
+.maintenance-schedule p {
+    margin: 5px 0;
+}
+
+.maintenance-schedule span {
+    font-weight: bold;
+    color: #fff;
+}
+
+.modal-close-button {
+    background-color: #3f3f3f;
+    color: white;
+    border: 1px solid #555;
+    padding: 8px 20px;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.modal-close-button:hover {
+    background-color: #555;
+}

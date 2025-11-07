@@ -97,12 +97,24 @@
   <div id="loading-modal" class="loading-modal">
     <div class="loading-content">
       <div class="loading-spinner"></div>
-      <p id="loading-message" class="loading-text" data-translate="CHECKING_UPDATES">Cheking updates...</p>
+      <p id="loading-message" class="loading-text" data-translate="CHECKING_UPDATES">Checking updates...</p>
       <p id="loading-error" class="loading-error loading-text"></p>
       <div class="loading-buttons">
         <button id="refresh-button" class="action-button" data-translate="REFRESH">Refresh</button>
         <button id="quit-button" class="action-button" data-translate="EXIT">EXIT</button>
       </div>
+    </div>
+  </div>
+
+  <div id="maintenance-modal" class="custom-modal-backdrop" style="display: none;"> 
+    <div class="custom-modal-content">
+        <h2 class="modal-title" data-translate="MAINTENANCE_TITLE">Maintenance Notice</h2>
+        <p class="maintenance-message" data-translate="MAINTENANCE_MESSAGE">The server is under maintenance. Please try again later.</p>
+        <div class="maintenance-schedule">
+            <p><span data-translate="START_TIME">Start time:</span> <span class="maintenance-start-time">N/A</span></p>
+            <p><span data-translate="END_TIME">End time:</span> <span class="maintenance-end-time">N/A</span></p>
+        </div>
+        <button onclick="App.hideMaintenanceModal()" class="modal-close-button" data-translate="ACKNOWLEDGE">OK</button>
     </div>
   </div>
 

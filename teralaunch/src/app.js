@@ -58,6 +58,8 @@ const App = {
     hashFileProgress: 0,
     currentProcessingFile: "",
     processedFiles: 0,
+    isMaintenanceActive: false, 
+    maintenanceDetails: null,
   },
 
   /**
@@ -122,6 +124,11 @@ const App = {
       document.addEventListener("DOMContentLoaded", () => {
         this.resetState();
         this.updateUI();
+      });
+
+      listen('maintenance_active', (event) => {
+        console.log("Maintenance active event received:", event.payload);
+        this.showMaintenanceModal(event.payload);
       });
 
       //just for debug
@@ -207,10 +214,17 @@ const App = {
       this.updateUIForGameStatus(isRunning);
     });
 
-    listen("game_ended", () => {
+    listen("game_ended", async () => { 
       console.log("Game has ended");
       this.updateUIForGameStatus(false);
       this.toggleModal("log-modal", false);
+
+      try {
+        await appWindow.unminimize();
+        await appWindow.setFocus();
+      } catch (e) {
+        console.error("Failed to unminimize or focus window:", e);
+      }
     });
   },
 
@@ -1275,6 +1289,11 @@ const App = {
       localStorage.removeItem("permission");
       localStorage.removeItem("privilege");
 
+      const generateHashFileBtn = document.getElementById("generate-hash-file");
+      if (generateHashFileBtn) {
+        generateHashFileBtn.style.display = "none";
+      }
+
       this.setState({
         updateCheckPerformed: false,
         updateCheckPerformedOnLogin: false,
@@ -1398,6 +1417,37 @@ const App = {
 
     this.setState({ isGameLaunching: true });
 
+    let isMaintenance = false;
+    try {
+        // Calls the Rust command that checks the server status and emits the 'maintenance_active' event if true.
+        isMaintenance = await invoke("check_maintenance_and_notify");
+    } catch (e) {
+        // Connection error or other issue during the check.
+        console.error("Error checking maintenance status:", e);
+        this.setState({ isGameLaunching: false });
+        this.updateUIForGameStatus(false);
+        // Use a translated or fallback message if the check fails
+        await message(this.t("SERVER_CONNECTION_ERROR"), {
+            title: this.t("ERROR"),
+            type: "error",
+        });
+        return;
+    }
+
+    if (isMaintenance) {
+        console.log("Game launch blocked: Server is in maintenance.");
+        this.setState({ isGameLaunching: false });
+        // The 'maintenance_active' listener already handled showing the modal.
+        return;
+    }
+
+    try {
+      await appWindow.minimize();
+    } catch (e) {
+      console.error("Failed to minimize window:", e);
+      // A failed minimization shouldn't block the game launch, but it will be logged.
+    }
+
     try {
       this.updateUIForGameStatus(true);
       if (this.statusEl) this.statusEl.textContent = this.t("LAUNCHING_GAME");
@@ -1413,15 +1463,31 @@ const App = {
       console.error("Error initiating game launch:", error);
       const game_launch_error = this.t("GAME_LAUNCH_ERROR") + error.toString();
 
-      await message(game_launch_error, {
-        title: this.t("ERROR"),
-        type: "error",
-      });
-      if (this.statusEl)
-        this.statusEl.textContent = this.t(
-          "GAME_LAUNCH_ERROR",
-          error.toString(),
-        );
+      // Specific handling for maintenance errors.
+      // Even though it was already checked earlier, this remains in case the server enters maintenance
+      // between the initial check and the final launch request.
+      if (error.toString().includes("MAINTENANCE_ACTIVE")) {
+        console.log("Launch blocked by MAINTENANCE_ACTIVE error from backend.");
+        // Restore (unminimize) the window if it was minimized right before the backend threw the error.
+        try {
+          await appWindow.unminimize();
+          await appWindow.setFocus();
+        } catch (e) {
+          console.error("Failed to unminimize or focus window after maintenance error:", e);
+        }
+      } else {
+        // Real game launch error (e.g., missing file, internal game error)
+        await message(game_launch_error, {
+          title: this.t("ERROR"),
+          type: "error",
+        });
+        if (this.statusEl)
+          this.statusEl.textContent = this.t(
+            "GAME_LAUNCH_ERROR",
+            error.toString(),
+          );
+      }
+
       await invoke("reset_launch_state");
       this.updateUIForGameStatus(false);
       this.setState({ gameExecutionFailed: true });
@@ -2180,6 +2246,75 @@ const App = {
   },
 
   /**
+   * Loads the client version from the backend config
+   * and displays it in the UI.
+   */
+  async loadClientVersion() {
+    const versionElement = document.getElementById("client-version-value");
+    if (!versionElement) {
+      console.warn("Client version element not found");
+      return;
+    }
+
+    try {
+      const version = await invoke("get_client_version");
+      versionElement.textContent = `${version}`;
+    } catch (error) {
+      console.error("Error loading client version:", error);
+      versionElement.textContent = "--.--"; 
+    }
+  },
+
+  /**
+   * Displays a custom maintenance modal with details.
+   * Assumes there is a modal element with the ID 'maintenance-modal' in the DOM.
+   * @param {Object} details - Maintenance details (Msg, StartTime, EndTime).
+   */
+  showMaintenanceModal(details) {
+    const modal = document.getElementById('maintenance-modal');
+    if (!modal) {
+      // Fallback to a simple message if the custom modal does not exist
+      message(details.Msg || "The server is under maintenance. Please try again later.", {
+          title: "Server Maintenance",
+          type: 'error',
+      });
+      return;
+    }
+
+    const messageEl = modal.querySelector('.maintenance-message');
+    const startTimeEl = modal.querySelector('.maintenance-start-time');
+    const endTimeEl = modal.querySelector('.maintenance-end-time');
+
+    // Time formatting function
+    const formatTime = (timestamp) => {
+        if (!timestamp) return 'N/A';
+        const date = new Date(timestamp * 1000); // Convert to milliseconds
+        return date.toLocaleString('en-US'); // Adjust locale as needed
+    };
+
+    if (messageEl) {
+        messageEl.textContent = this.t("MAINTENANCE_MESSAGE"); 
+    }
+    if (startTimeEl) startTimeEl.textContent = formatTime(details.StartTime);
+    if (endTimeEl) endTimeEl.textContent = formatTime(details.EndTime);
+
+    // Show the modal (using your CSS logic)
+    modal.style.display = 'flex'; 
+    this.state.isMaintenanceActive = true;
+    this.state.maintenanceDetails = details;
+  },
+
+  hideMaintenanceModal() {
+      const modal = document.getElementById('maintenance-modal');
+      if (modal) {
+          modal.style.display = 'none'; 
+      }
+      this.state.isMaintenanceActive = false;
+      this.state.maintenanceDetails = null;
+  },
+
+ 
+  /**
    * Initializes the home page components
    *
    * This method initializes the components on the home page, such as the game
@@ -2197,6 +2332,7 @@ const App = {
     this.updateUI();
     const isGameRunning = await this.isGameRunning();
     this.updateUIForGameStatus(isGameRunning);
+    this.loadClientVersion();
   },
 
   // Update the initUserPanel method

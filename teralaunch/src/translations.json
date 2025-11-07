@@ -57,7 +57,13 @@
     "SPEED_LABEL": "Vitesse :",
     "TIME_REMAINING_LABEL": "Temps restant :",
     "FOLDER_SAVED_SUCCESS": "Dossier enregistré avec succès !",
-    "GAME_LAUNCH_ERROR": "Erreur lors du lancement du jeu: "
+	  "FOLDER_SELECTION_ERROR": "Échec de la sélection du dossier du jeu. Veuillez réessayer.",
+    "GAME_LAUNCH_ERROR": "Erreur lors du lancement du jeu: ",
+    "MAINTENANCE_TITLE": "Avis de maintenance",
+    "MAINTENANCE_MESSAGE": "Le serveur est en maintenance. Veuillez réessayer plus tard.",
+    "START_TIME": "Heure de début :",
+    "END_TIME": "Heure de fin :",
+    "ACKNOWLEDGE": "OK"
   },
   "EUR": {
     "LOGIN_TITLE": "Login",
@@ -117,7 +123,13 @@
     "SPEED_LABEL": "Speed:",
     "TIME_REMAINING_LABEL": "Time remaining:",
     "FOLDER_SAVED_SUCCESS": "Folder saved successfully!",
-    "GAME_LAUNCH_ERROR": "Error launching game: "
+	  "FOLDER_SELECTION_ERROR": "Failed to select game folder. Please try again.",
+    "GAME_LAUNCH_ERROR": "Error launching game: ",
+    "MAINTENANCE_TITLE": "Maintenance Notice",
+    "MAINTENANCE_MESSAGE": "The server is under maintenance. Please try again later.",
+    "START_TIME": "Start Time:",
+    "END_TIME": "End Time:",
+    "ACKNOWLEDGE": "OK"
   },
   "RUS": {
     "LOGIN_TITLE": "Вход",
@@ -177,7 +189,13 @@
     "SPEED_LABEL": "Скорость:",
     "TIME_REMAINING_LABEL": "Оставшееся время:",
     "FOLDER_SAVED_SUCCESS": "Папка успешно сохранена!",
-    "GAME_LAUNCH_ERROR": "Ошибка при запуске игры: "
+	  "FOLDER_SELECTION_ERROR": "Не удалось выбрать папку с игрой. Пожалуйста, попробуйте снова.",
+    "GAME_LAUNCH_ERROR": "Ошибка при запуске игры: ",
+    "MAINTENANCE_TITLE": "Уведомление о техническом обслуживании",
+    "MAINTENANCE_MESSAGE": "Сервер находится на техническом обслуживании. Пожалуйста, попробуйте позже.",
+    "START_TIME": "Время начала:",
+    "END_TIME": "Время окончания:",
+    "ACKNOWLEDGE": "OK"
   },
   "GER": {
     "LOGIN_TITLE": "Anmelden",
@@ -237,6 +255,12 @@
     "SPEED_LABEL": "Geschwindigkeit:",
     "TIME_REMAINING_LABEL": "Verbleibende Zeit:",
     "FOLDER_SAVED_SUCCESS": "Ordner erfolgreich gespeichert!",
-    "GAME_LAUNCH_ERROR": "Fehler beim Starten des Spiels: "
+	  "FOLDER_SELECTION_ERROR": "Fehler bei der Auswahl des Spielordners. Bitte versuchen Sie es erneut.",
+    "GAME_LAUNCH_ERROR": "Fehler beim Starten des Spiels: ",
+    "MAINTENANCE_TITLE": "Wartungshinweis",
+    "MAINTENANCE_MESSAGE": "Der Server wird gewartet. Bitte versuchen Sie es später erneut.",
+    "START_TIME": "Startzeit:",
+    "END_TIME": "Endzeit:",
+    "ACKNOWLEDGE": "OK"
   }
 }

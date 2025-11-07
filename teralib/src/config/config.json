@@ -1,6 +1,7 @@
 {
-    "LOGIN_ACTION_URL": "http://SERVERIP-URI/launcher/LoginAction",
+    "LAUNCHER_ACTION_URL": "http://SERVERIP-URI",
     "HASH_FILE_URL": "http://SERVERIP-URI/tera/launcher/hash-file.json",
     "FILE_SERVER_URL": "http://SERVERIP-URI/public",
-    "SERVER_LIST_URL": "http://SERVERIP-URI/tera/ServerList.json?lang=en&sort=3"
+    "SERVER_LIST_URL": "http://SERVERIP-URI/tera/ServerList.json?lang=en&sort=3",
+    "CLIENT_VERSION": "31.04"
   }
