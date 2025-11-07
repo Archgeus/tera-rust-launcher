@@ -2,7 +2,7 @@
 
 ![Tera Launcher Interface](https://forum.ragezone.com/attachments/tera-png.264594/)
 
-![Tera maintenance modal](http://ss.archgeus.com/u/rkVXtl.png)
+![Tera maintenance modal](http://ss.archgeus.com/u/pESeD3.png))
 
 ## Description
 Tera Rust Launcher is a custom game launcher designed for Tera Online. It provides features such as automatic updates, game file verification, and multi-language support.
