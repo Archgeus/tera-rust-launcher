@@ -48,11 +48,88 @@
   font-weight: 500;
   font-size: 14px;
   color: rgba(255, 255, 255, 0.4);
+  text-align: center;
+  caret-color: #fff;
   min-width: 154px;
+  mix-blend-mode: normal;
+  backdrop-filter: none;
+  letter-spacing: inherit;
   
   -webkit-appearance: none;
   -moz-appearance: none;
   appearance: none;
+}
+
+.input-text::placeholder {
+  color: rgba(255, 255, 255, 0.4) !important;
+  text-align: center;
+  font-family: Raleway;
+  font-weight: 500;
+  font-size: 14px;
+  opacity: 1 !important;
+}
+
+.input-text::-webkit-input-placeholder {
+  color: rgba(255, 255, 255, 0.4) !important;
+  opacity: 1 !important;
+}
+
+.input-text:-moz-placeholder {
+  color: rgba(255, 255, 255, 0.4) !important;
+  opacity: 1 !important;
+}
+
+.input-text::-moz-placeholder {
+  color: rgba(255, 255, 255, 0.4) !important;
+  opacity: 1 !important;
+}
+
+.input-text:-ms-input-placeholder {
+  color: rgba(255, 255, 255, 0.4) !important;
+  opacity: 1 !important;
+}
+
+input[type="password"].input-text::placeholder {
+  color: rgba(255, 255, 255, 0.4) !important;
+  opacity: 1 !important;
+}
+
+input[type="password"].input-text::-webkit-input-placeholder {
+  color: rgba(255, 255, 255, 0.4) !important;
+  opacity: 1 !important;
+}
+
+.input-text:-webkit-autofill,
+.input-text:-webkit-autofill:hover,
+.input-text:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 30px rgba(255, 255, 255, 0.08) inset !important;
+  -webkit-text-fill-color: rgba(255, 255, 255, 0.4) !important;
+  background-color: rgba(255, 255, 255, 0.08) !important;
+  border: 1px solid rgba(255, 255, 255, 0.03) !important;
+}
+
+input[type="text"].input-text {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+input[type="password"].input-text {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.03);
+  -webkit-text-security: disc;
+}
+
+.input-text:focus {
+  background-color: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.input-text:-webkit-autofill::first-line {
+  font-family: Raleway;
+  font-weight: 500;
+  font-size: 14px;
 }
 .input-fields,
 .input-fields-wrapper {
@@ -192,15 +269,4 @@
   background-position: top;
   letter-spacing: normal;
   line-height: normal;
-}
-
-input[type="password"].input-text {
-  background-color: rgba(255, 255, 255, 0.08) !important;
-  color: rgba(255, 255, 255, 0.4) !important;
-  border: 1px solid rgba(255, 255, 255, 0.03) !important;
-  text-align: center;
-  caret-color: #fff;
-  mix-blend-mode: normal !important;
-  backdrop-filter: none !important;
-  -webkit-text-security: disc !important;
 }
