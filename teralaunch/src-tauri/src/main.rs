@@ -1370,7 +1370,7 @@ async fn handle_logout(state: tauri::State<'_, GameState>) -> Result<(), String>
     let base_url = &*LAUNCHER_BASE_URL;
     let logout_url = format!("{}/launcher/LogoutAction", base_url);
     
-    if let Ok(_response) = reqwest::Client::new().post(&logout_url).send().await {
+    if let Ok(_response) = reqwest::Client::new().get(&logout_url).send().await {
       info!("Server logout completed");
     } else {
       error!("Failed to revoke session on server, proceeding with local logout");
