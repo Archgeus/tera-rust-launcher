@@ -33,40 +33,8 @@ use walkdir::WalkDir;
 use reqwest::cookie::Jar;
 use reqwest::cookie::CookieStore;
 use url::Url;
-use regex::Regex;
 
 // Struct definitions
-#[derive(Serialize, Deserialize)]
-struct LoginResponse {
-  #[serde(rename = "Return")]
-  return_value: bool,
-  #[serde(rename = "ReturnCode")]
-  return_code: i32,
-  #[serde(rename = "Msg")]
-  msg: String,
-  #[serde(rename = "CharacterCount")]
-  character_count: String,
-  #[serde(rename = "Permission")]
-  permission: i32,
-  #[serde(rename = "Privilege")]
-  privilege: i32,
-  #[serde(rename = "UserNo")]
-  user_no: i32,
-  #[serde(rename = "UserName")]
-  user_name: String,
-  #[serde(rename = "AuthKey")]
-  auth_key: String,
-}
-
-#[derive(Serialize)]
-struct AuthInfo {
-  character_count: String,
-  permission: i32,
-  privilege: i32,
-  user_no: i32,
-  user_name: String,
-  auth_key: String,
-}
 
 struct GlobalAuthInfo {
   character_count: String,
@@ -321,20 +289,20 @@ fn get_files_server_url() -> String {
 
 fn find_config_file() -> Option<PathBuf> {
   let current_dir = env::current_dir().ok()?;
-  let config_in_current = current_dir.join("tera_config.ini");
+  let config_in_current = current_dir.join("config.ini");
   if config_in_current.exists() {
     return Some(config_in_current);
   }
 
   let parent_dir = current_dir.parent()?;
-  let config_in_parent = parent_dir.join("tera_config.ini");
+  let config_in_parent = parent_dir.join("config.ini");
   if config_in_parent.exists() {
     return Some(config_in_parent);
   }
 
   if let Ok(exe_path) = env::current_exe() {
     if let Some(exe_dir) = exe_path.parent() {
-      let config_in_exe_dir = exe_dir.join("tera_config.ini");
+      let config_in_exe_dir = exe_dir.join("config.ini");
       if config_in_exe_dir.exists() {
         return Some(config_in_exe_dir);
       }
@@ -344,8 +312,52 @@ fn find_config_file() -> Option<PathBuf> {
   None
 }
 
+/// Get the default configuration file path (in the launcher directory)
+fn get_default_config_path() -> Result<PathBuf, String> {
+  let exe_path = env::current_exe()
+    .map_err(|e| format!("Failed to get launcher directory: {}", e))?;
+  
+  let exe_dir = exe_path.parent()
+    .ok_or("Failed to get launcher parent directory")?;
+  
+  Ok(exe_dir.join("config.ini"))
+}
+
+/// Create a default config file if it doesn't exist
+fn create_default_config(config_path: &PathBuf) -> Result<(), String> {
+  let exe_path = env::current_exe()
+    .map_err(|e| format!("Failed to get launcher directory: {}", e))?;
+  
+  let exe_dir = exe_path.parent()
+    .ok_or("Failed to get launcher parent directory")?;
+  
+  let mut conf = Ini::new();
+  conf.with_section(Some("game"))
+    .set("lang", "EUR")
+    .set("path", exe_dir.to_str().ok_or("Invalid launcher path")?);
+
+  let mut file = File::create(&config_path)
+    .map_err(|e| format!("Failed to create config file: {}", e))?;
+
+  conf.write_to(&mut file)
+    .map_err(|e| format!("Failed to write config: {}", e))?;
+  
+  info!("Created default config.ini at {:?}", config_path);
+  
+  Ok(())
+}
+
 fn load_config() -> Result<(PathBuf, String), String> {
-  let config_path = find_config_file().ok_or("Config file not found")?;
+  // Try to find existing config file
+  let config_path = if let Some(path) = find_config_file() {
+    path
+  } else {
+    // If not found, create default config at launcher directory
+    let default_path = get_default_config_path()?;
+    create_default_config(&default_path)?;
+    default_path
+  };
+
   let conf = Ini::load_from_file(&config_path).map_err(|e|
     format!("Failed to load config: {}", e)
   )?;
@@ -600,7 +612,7 @@ fn get_game_path_from_config() -> Result<String, String> {
       .map(|s| s.to_string()),
     Err(e) => {
       if e.contains("Config file not found") {
-        Err("tera_config.ini is missing".to_string())
+        Err("config.ini is missing".to_string())
       } else {
         Err(e)
       }
@@ -616,6 +628,21 @@ async fn check_update_required(window: tauri::Window) -> Result<bool, String> {
   }
 }
 
+// Security: Validate file paths to prevent path traversal attacks
+fn is_safe_path(path: &str) -> bool {
+  use std::path::Component;
+  
+  // Reject paths with parent directory references
+  if path.contains("..") || path.starts_with("/") || path.starts_with("\\") {
+    return false;
+  }
+  
+  // Reject paths that normalize to a parent directory
+  std::path::Path::new(path)
+    .components()
+    .all(|c| !matches!(c, Component::ParentDir | Component::RootDir))
+}
+
 #[tauri::command]
 async fn update_file(
   _app_handle: tauri::AppHandle,
@@ -627,7 +654,18 @@ async fn update_file(
   downloaded_size: u64,
 ) -> Result<u64, String> {
   let game_path = get_game_path()?;
+  
+  // SECURITY: Validate file path to prevent path traversal attacks
+  if !is_safe_path(&file_info.path) {
+    return Err(format!("Invalid file path detected: {}. Path traversal attack blocked.", file_info.path));
+  }
+  
   let file_path = game_path.join(&file_info.path);
+  
+  // SECURITY: Ensure the final file path is within the game directory
+  if !file_path.starts_with(&game_path) {
+    return Err(format!("Path traversal attack detected. File would be extracted outside game directory."));
+  }
 
   if let Some(parent) = file_path.parent() {
     tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
@@ -1166,12 +1204,10 @@ async fn login(username: String, password: String) -> Result<String, String> {
     let login_url = format!("{}/launcher/LoginAction", base_url);
 
     // --- Step 2: POST to /launcher/LoginAction (Authentication) ---
-    let payload = format!("login={}&password={}", username, password);
-
+    // Use .form() to properly encode parameters and prevent URL injection attacks
     let login_res = client
         .post(&login_url)
-        .body(payload)
-        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[("login", username.as_str()), ("password", password.as_str())])
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1323,7 +1359,25 @@ async fn handle_logout(state: tauri::State<'_, GameState>) -> Result<(), String>
   let mut is_launching = state.is_launching.lock().await;
   *is_launching = false;
 
-  // Reset global authentication information
+  // Step 1: Attempt to revoke the session on the server (security best practice)
+  // This ensures the auth_key is invalidated server-side, even if compromised
+  let auth_key = {
+    let auth_info = GLOBAL_AUTH_INFO.read().unwrap();
+    auth_info.auth_key.clone()
+  };  // Lock is released here before the await point
+
+  if !auth_key.is_empty() {
+    let base_url = &*LAUNCHER_BASE_URL;
+    let logout_url = format!("{}/launcher/LogoutAction", base_url);
+    
+    if let Ok(_response) = reqwest::Client::new().post(&logout_url).send().await {
+      info!("Server logout completed");
+    } else {
+      error!("Failed to revoke session on server, proceeding with local logout");
+    }
+  }
+
+  // Step 2: Reset global authentication information locally
   {
     let mut auth_info = GLOBAL_AUTH_INFO.write().unwrap();
     auth_info.auth_key = String::new();
@@ -1620,7 +1674,7 @@ fn main() {
     ::default()
     .manage(game_state)
     .setup(|app| {
-      let window = app.get_window("main").unwrap();
+      let _window = app.get_window("main").unwrap();
       let app_handle = app.handle();
       println!("Tauri setup started");
 
