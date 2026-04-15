@@ -4,7 +4,7 @@ const { appWindow } = window.__TAURI__.window;
 const { message } = window.__TAURI__.dialog;
 
 const REQUIRED_PRIVILEGE_LEVEL = 3;
-const UPDATE_CHECK_ENABLED = false;
+const UPDATE_CHECK_ENABLED = true;
 
 const App = {
   translations: {},
@@ -60,6 +60,8 @@ const App = {
     processedFiles: 0,
     isMaintenanceActive: false,
     maintenanceDetails: null,
+    shouldLaunchAfterUpdate: false,
+    justCompletedUpdate: false,
   },
 
   /**
@@ -117,7 +119,7 @@ const App = {
       await this.updateLanguageSelector();
       this.Router.setupEventListeners();
       await this.Router.navigate();
-      this.sendStoredAuthInfoToBackend();
+      await this.sendStoredAuthInfoToBackend(); // WAIT for auth sync before checking connection
       this.setupMutationObserver();
 
       this.checkAuthentication();
@@ -391,6 +393,12 @@ const App = {
       return;
     }
 
+    // Safety check: only process if we expect download progress
+    if (this.state.currentUpdateMode !== "download" && this.state.currentUpdateMode !== "file_check") {
+      console.warn(`Ignoring download progress event - current mode is ${this.state.currentUpdateMode}`);
+      return;
+    }
+
     const {
       file_name,
       progress,
@@ -401,45 +409,42 @@ const App = {
       current_file_index,
     } = event.payload;
 
-    console.log("Received download progress event:", event.payload);
-
-    // Ensure totalSize is initialized correctly
-    if (this.state.totalSize === undefined || this.state.totalSize === 0) {
-      this.state.totalSize = total_bytes;
+    // Only process if we have a valid total_bytes
+    if (!total_bytes || total_bytes === 0) {
+      console.warn("Skipping download progress: invalid total_bytes");
+      return;
     }
 
-    // Update total downloaded bytes
-    const totalDownloadedBytes = downloaded_bytes;
+    // Only process download events if we're in download mode (not file_check)
+    if (this.state.currentUpdateMode !== "download") {
+      console.warn(`Ignoring download progress event - current mode is ${this.state.currentUpdateMode}`);
+      return;
+    }
 
-    // Calculate global remaining time using totalDownloadedBytes
+    // Calculate global progress from bytes, not from individual file progress
+    const globalProgress = Math.min(100, (downloaded_bytes / total_bytes) * 100);
+
+    // Calculate global remaining time using downloaded_bytes
     const timeRemaining = this.calculateGlobalTimeRemaining(
-      totalDownloadedBytes,
-      this.state.totalSize,
+      downloaded_bytes,
+      total_bytes,
       speed
     );
 
-    console.log("Calculated download progress:", {
-      speed,
-      totalDownloadedBytes,
-      timeRemaining,
-    });
-
     this.setState({
       currentFileName: file_name,
-      currentProgress: Math.min(100, progress),
+      currentProgress: globalProgress,
       currentSpeed: speed,
       downloadedSize: downloaded_bytes,
       totalSize: total_bytes,
       totalFiles: total_files,
       currentFileIndex: current_file_index,
-      totalDownloadedBytes: totalDownloadedBytes,
       timeRemaining: timeRemaining,
-      currentUpdateMode: "download",
       lastProgressUpdate: Date.now(),
       lastDownloadedBytes: downloaded_bytes,
     });
 
-    console.log("Updated state:", this.state);
+    this.updateUI(); // Trigger UI update to show download progress
   },
 
   /**
@@ -459,6 +464,13 @@ const App = {
       return;
     }
 
+    // Only process file check events if we're not already in download mode
+    // (to prevent interference with download progress events)
+    if (this.state.currentUpdateMode === "download") {
+      console.warn("Ignoring file check progress - download is in progress");
+      return;
+    }
+
     const { current_file, progress, current_count, total_files } =
       event.payload;
 
@@ -470,6 +482,7 @@ const App = {
       totalFiles: total_files,
       currentUpdateMode: "file_check",
     });
+    this.updateUI(); // Trigger UI update to show file check progress
   },
 
   /**
@@ -482,17 +495,13 @@ const App = {
    * - average_time_per_file_ms: The average time taken to check each file in milliseconds.
    */
   handleFileCheckCompleted(event) {
-    const {
-      total_files,
-      files_to_update,
-      total_time_seconds,
-      average_time_per_file_ms,
-    } = event.payload;
-    this.setState({
-      isFileCheckComplete: true,
-      currentUpdateMode: "complete",
-    });
-    this.handleCompletion();
+    // File check is done — just record the result.
+    // Callers (checkForUpdates, handleLaunchGame, forceFileVerification) control what
+    // happens next; calling handleCompletion() here would prematurely enable the button
+    // and corrupt the download flow via its 2-second deferred timer.
+    const { files_to_update } = event.payload;
+    console.log(`handleFileCheckCompleted: file check done, files_to_update=${files_to_update}`);
+    this.setState({ isFileCheckComplete: true });
   },
 
   /**
@@ -503,6 +512,7 @@ const App = {
     this.setState({
       isUpdateComplete: true,
       currentUpdateMode: "complete",
+      currentFileName: "All done.",
     });
   },
 
@@ -567,7 +577,6 @@ const App = {
         this.state.currentUpdateMode === "download"
           ? this.formatTime(this.state.timeRemaining)
           : "";
-      console.log("Formatted time:", timeText);
       elements.timeRemaining.textContent = timeText || "Calculating...";
     }
 
@@ -643,37 +652,23 @@ const App = {
    *   timeRemaining: The element to display the time remaining.
    */
   updateDownloadInfo(elements) {
-    console.log("Current update mode:", this.state.currentUpdateMode);
-    console.log("Current speed:", this.state.currentSpeed);
-    console.log("Time remaining:", this.state.timeRemaining);
-
+    // Update download speed and time remaining only during download mode
     if (elements.downloadSpeed) {
-      const speedText =
-        this.state.currentUpdateMode === "download"
-          ? this.formatSpeed(this.state.currentSpeed)
-          : "";
-      console.log("Formatted speed:", speedText);
+      let speedText = "";
+      if (this.state.currentUpdateMode === "download") {
+        speedText = this.formatSpeed(this.state.currentSpeed);
+      }
       elements.downloadSpeed.textContent = speedText;
-      console.log(
-        "Download speed element updated:",
-        elements.downloadSpeed.textContent
-      );
-    } else {
-      console.log("Download speed element not found");
+      console.log("Download speed updated:", speedText);
     }
+    
     if (elements.timeRemaining) {
-      const timeText =
-        this.state.currentUpdateMode === "download"
-          ? this.formatTime(this.state.timeRemaining)
-          : "";
-      console.log("Formatted time:", timeText);
+      let timeText = "";
+      if (this.state.currentUpdateMode === "download") {
+        timeText = this.formatTime(this.state.timeRemaining);
+      }
       elements.timeRemaining.textContent = timeText;
-      console.log(
-        "Time remaining element updated:",
-        elements.timeRemaining.textContent
-      );
-    } else {
-      console.log("Time remaining element not found");
+      console.log("Time remaining updated:", timeText);
     }
   },
 
@@ -729,6 +724,20 @@ const App = {
    * @returns {number} The current progress as a percentage
    */
   calculateProgress() {
+    if (this.state.currentUpdateMode === "download") {
+      // For download, calculate from total downloaded bytes vs total size
+      if (this.state.totalSize > 0) {
+        return (this.state.downloadedSize / this.state.totalSize) * 100;
+      }
+    } else if (this.state.currentUpdateMode === "file_check") {
+      // For file check, use currentProgress from backend
+      return this.state.currentProgress;
+    } else if (this.state.currentUpdateMode === "complete") {
+      // File check or download just finished — show 100%
+      return 100;
+    }
+    
+    // Otherwise use downloadedSize / totalSize if available
     if (this.state.isUpdateAvailable && this.state.totalSize > 0) {
       return (this.state.downloadedSize / this.state.totalSize) * 100;
     }
@@ -764,6 +773,12 @@ const App = {
       this.state.isUpdateAvailable &&
       this.state.currentUpdateMode === "download";
 
+    console.log("updateElementsVisibility:", {
+      isUpdateAvailable: this.state.isUpdateAvailable,
+      currentUpdateMode: this.state.currentUpdateMode,
+      showDownloadInfo: showDownloadInfo,
+    });
+
     if (elements.currentFile)
       elements.currentFile.style.display = this.state.isUpdateAvailable
         ? "flex"
@@ -788,14 +803,16 @@ const App = {
           ? "inline"
           : "none";
     }
-    if (elements.downloadSpeed)
-      elements.downloadSpeed.style.display = showDownloadInfo
-        ? "inline"
-        : "none";
-    if (elements.timeRemaining)
-      elements.timeRemaining.style.display = showDownloadInfo
-        ? "inline"
-        : "none";
+    if (elements.downloadSpeed) {
+      const isVisible = showDownloadInfo ? "inline" : "none";
+      elements.downloadSpeed.style.display = isVisible;
+      console.log("Download speed visibility:", isVisible);
+    }
+    if (elements.timeRemaining) {
+      const isVisible = showDownloadInfo ? "inline" : "none";
+      elements.timeRemaining.style.display = isVisible;
+      console.log("Time remaining visibility:", isVisible);
+    }
   },
 
   /**
@@ -840,15 +857,36 @@ const App = {
       isDownloadComplete: true,
       currentProgress: 100,
       currentUpdateMode: "complete",
+      currentFileName: "All done.",
     });
+    this.updateUI(); // Render the 100% state immediately
     setTimeout(() => {
+      // Refresh element references after update completes
+      this.setupHomePageElements();
+      this.setupHomePageEventListeners();
+      this.setupWindowControls();
+      
+      const shouldLaunchAfterUpdate = this.state.shouldLaunchAfterUpdate;
+      
       this.setState({
         isUpdateComplete: true,
         currentUpdateMode: "ready",
+        shouldLaunchAfterUpdate: false,
+        isDownloadComplete: false,
+        // Don't reset isUpdateAvailable here - it's needed to determine if update was completed
       });
       // Re-enable the game launch button and language selector
       this.updateLaunchGameButton(false);
       this.toggleLanguageSelector(true);
+      
+      // Auto-launch the game if updates were initiated from the pre-launch check
+      if (shouldLaunchAfterUpdate) {
+        console.log("handleCompletion: Auto-launching game after update completion");
+        // Add a small delay to ensure all backend processes complete
+        setTimeout(() => {
+          this.handleLaunchGame();
+        }, 500);
+      }
     }, 2000);
   },
 
@@ -930,6 +968,10 @@ const App = {
       return;
     }
 
+    // FIRST: Reset state to clear any previous data
+    this.resetState();
+    
+    // THEN: Set state for file check operation
     this.setState({
       isCheckingForUpdates: true,
       currentUpdateMode: "file_check",
@@ -939,8 +981,6 @@ const App = {
     this.toggleLanguageSelector(false);
 
     try {
-      this.resetState();
-
       const filesToUpdate = await invoke("get_files_to_update");
 
       if (filesToUpdate.length === 0) {
@@ -952,6 +992,10 @@ const App = {
         // Re-enable elements if no update is needed
         this.updateLaunchGameButton(false);
         this.toggleLanguageSelector(true);
+        // Refresh element references and listeners
+        this.setupHomePageElements();
+        this.setupHomePageEventListeners();
+        this.setupWindowControls();
         setTimeout(() => {
           this.setState({ currentUpdateMode: "ready" });
         }, 1000);
@@ -978,8 +1022,61 @@ const App = {
       // Re-enable elements in case of error
       this.updateLaunchGameButton(false);
       this.toggleLanguageSelector(true);
+      // Refresh element references and listeners after error
+      this.setupHomePageElements();
+      this.setupHomePageEventListeners();
+      this.setupWindowControls();
     } finally {
       this.setState({ isCheckingForUpdates: false });
+    }
+  },
+
+  /**
+   * Forces a complete file verification by re-checking all files against the server.
+   * This is triggered by the repair button in the UI.
+   */
+  async forceFileVerification() {
+    console.log("🔧 forceFileVerification() called");
+
+    if (this.state.isCheckingForUpdates || this.state.currentUpdateMode === "download") {
+      console.log("🔧 forceFileVerification: operation already in progress, ignoring");
+      return;
+    }
+
+    // Reset + set state for force file check
+    this.resetState();
+    this.setState({
+      isCheckingForUpdates: true,
+      currentUpdateMode: "file_check",
+    });
+    this.updateLaunchGameButton(true);
+    this.toggleLanguageSelector(false);
+
+    try {
+      console.log("🔧 Calling get_files_to_update_force (ignoring cache)...");
+      const filesToUpdate = await invoke("get_files_to_update_force");
+      console.log("🔧 Force verification result: files to update =", filesToUpdate.length);
+
+      if (filesToUpdate.length === 0) {
+        this.setState({
+          isUpdateAvailable: false,
+          isFileCheckComplete: true,
+          currentUpdateMode: "complete",
+          currentFileName: "All done.",
+        });
+        setTimeout(() => this.setState({ currentUpdateMode: "ready" }), 2000);
+      } else {
+        console.log("🔧 Files need updating, running patch system...");
+        await this.runPatchSystem(filesToUpdate);
+      }
+    } catch (error) {
+      console.error("🔧 forceFileVerification error:", error);
+      this.resetState();
+      this.showErrorMessage(this.t("UPDATE_SERVER_UNREACHABLE"));
+    } finally {
+      this.setState({ isCheckingForUpdates: false });
+      this.updateLaunchGameButton(false);
+      this.toggleLanguageSelector(true);
     }
   },
 
@@ -996,71 +1093,70 @@ const App = {
    * @returns {Promise<void>}
    */
   async runPatchSystem(filesToUpdate) {
+    console.log("runPatchSystem: CALLED with", filesToUpdate.length, "files");
+    
     if (!UPDATE_CHECK_ENABLED) {
-      console.log("Updates are disabled, skipping patch system");
+      console.log("runPatchSystem: ERROR - Updates are disabled, skipping patch system");
       return;
     }
     try {
+      console.log("runPatchSystem: Resetting state");
+      // Reset state to clear any previous update data
+      this.resetState();
+      
       // Disable the game launch button and language selector at the start of the process
+      console.log("runPatchSystem: Disabling launch button and language selector");
       this.updateLaunchGameButton(true);
       this.toggleLanguageSelector(false);
 
       if (filesToUpdate.length === 0) {
-        console.log("No update needed");
+        console.log("runPatchSystem: No update needed");
         // Re-enable elements if no update is needed
         this.updateLaunchGameButton(false);
         this.toggleLanguageSelector(true);
         return;
       }
 
+      // Set proper state for download operation
+      const totalSize = filesToUpdate.reduce((total, file) => total + file.size, 0);
+      console.log("runPatchSystem: Setting state for download", {
+        filesCount: filesToUpdate.length,
+        totalSizeBytes: totalSize,
+        totalSizeMB: (totalSize / 1024 / 1024).toFixed(2)
+      });
+      
+      this.setState({
+        isCheckingForUpdates: true,
+        isUpdateAvailable: true,
+        currentUpdateMode: "download",
+        totalFiles: filesToUpdate.length,
+        totalSize: totalSize,
+        downloadedSize: 0,
+      });
+
+      // Wait for the download to complete (backend emits progress events)
+      console.log("runPatchSystem: CALLING invoke(download_all_files)");
       const downloadedSizes = await invoke("download_all_files", {
         filesToUpdate: filesToUpdate,
       });
 
-      let totalDownloadedSize = 0;
-      let lastUpdateTime = Date.now();
-      let lastDownloadedSize = 0;
-      for (let i = 0; i < downloadedSizes.length; i++) {
-        const fileInfo = filesToUpdate[i];
-        const downloadedSize = downloadedSizes[i];
-        totalDownloadedSize += downloadedSize;
-
-        this.setState({
-          currentFileName: fileInfo.path,
-          currentFileIndex: i + 1,
-          downloadedSize: totalDownloadedSize,
-        });
-
-        const currentTime = Date.now();
-        const timeDiff = (currentTime - lastUpdateTime) / 1000; // in seconds
-        const sizeDiff = totalDownloadedSize - lastDownloadedSize;
-        const speed = sizeDiff / timeDiff; // bytes per second
-
-        // Emit a progress event if necessary
-        this.handleDownloadProgress({
-          payload: {
-            file_name: fileInfo.path,
-            progress: (totalDownloadedSize / this.state.totalSize) * 100,
-            speed: speed,
-            downloaded_bytes: totalDownloadedSize,
-            total_bytes: this.state.totalSize,
-            total_files: this.state.totalFiles,
-            current_file_index: i + 1,
-          },
-        });
-
-        lastUpdateTime = currentTime;
-        lastDownloadedSize = totalDownloadedSize;
-      }
-
+      // Download completed, handled by event listeners for progress updates
+      console.log("runPatchSystem: invoke(download_all_files) completed, calling handleCompletion()");
       this.handleCompletion();
     } catch (error) {
-      console.error("Error during update:", error);
+      console.error("runPatchSystem: ERROR during update:", error);
+      console.error("runPatchSystem: Error details:", { message: error.message, stack: error.stack });
       this.showErrorMessage(this.t("UPDATE_ERROR_MESSAGE"));
     } finally {
+      console.log("runPatchSystem: Finally block - re-enabling buttons");
+      // Reset the checking flag so buttons are usable again
+      this.setState({ isCheckingForUpdates: false });
       // Re-enable the game launch button and language selector at the end of the process
       this.updateLaunchGameButton(false);
       this.toggleLanguageSelector(true);
+      // Refresh element references and listeners after update
+      this.setupHomePageElements();
+      this.setupHomePageEventListeners();
     }
   },
 
@@ -1118,7 +1214,7 @@ const App = {
         jsonResponse.Msg === "success"
       ) {
         // Store auth info received from the backend
-        this.storeAuthInfo(jsonResponse);
+        await this.storeAuthInfo(jsonResponse);
         console.log("Login success");
 
         // If update checks are disabled, skip to home screen
@@ -1221,7 +1317,7 @@ const App = {
    * @param {number} jsonResponse.Permission - The permission level
    * @param {number} jsonResponse.Privilege - The privilege level
    */
-  storeAuthInfo(jsonResponse) {
+  async storeAuthInfo(jsonResponse) {
     localStorage.setItem("authKey", jsonResponse.AuthKey);
     localStorage.setItem("userName", jsonResponse.UserName);
     localStorage.setItem("userNo", jsonResponse.UserNo.toString());
@@ -1237,7 +1333,7 @@ const App = {
       localStorage.setItem("sessionCookie", jsonResponse.session_cookie);
     }
 
-    invoke("set_auth_info", {
+    await invoke("set_auth_info", {
       authKey: jsonResponse.AuthKey,
       userName: jsonResponse.UserName,
       userNo: jsonResponse.UserNo,
@@ -1419,49 +1515,50 @@ const App = {
    * @returns {void}
    */
   async handleLaunchGame() {
+    console.log("handleLaunchGame() called");
+
+    if (this.state.isCheckingForUpdates || this.state.currentUpdateMode === "download" || this.state.currentUpdateMode === "file_check" || this.state.isGameLaunching) {
+      return;
+    }
+
+    // Step 1: Refresh account info
     try {
-      // Step 1: Invoke the new Rust command to get fresh account data
-      console.log("Re-checking account status...");
       const rawResponse = await invoke("get_fresh_account_info");
       const freshInfo = JSON.parse(rawResponse);
-
-      // Step 2: Update *all* our stored data
-      // This syncs both localStorage AND Rust’s GLOBAL_AUTH_INFO with the new AuthKey
-      this.storeAuthInfo(freshInfo);
-
-      // Step 3: Check the updated ban status
+      await this.storeAuthInfo(freshInfo);
       if (freshInfo.Banned) {
-        console.log("Game launch blocked: Account is banned (fresh check).");
-        this.showErrorModal(
-          this.t("ERROR"),
-          this.t("ACCOUNT_BANNED") || "This account is banned."
-        );
-        return; // Stop the launch
+        this.showErrorModal(this.t("ERROR"), this.t("ACCOUNT_BANNED") || "This account is banned.");
+        return;
       }
-      console.log("Account status OK.");
     } catch (error) {
-      // This can fail if the session expired on the server
-      console.error("Failed to get fresh account info:", error);
-      this.showErrorModal(
-        this.t("ERROR"),
-        this.t("SERVER_CONNECTION_ERROR") ||
-          "Session expired. Please log out and log back in."
-      );
-      return; // Stop the launch
-    }
-
-    if (UPDATE_CHECK_ENABLED && this.state.isUpdateAvailable) {
-      console.log(
-        "Updates are available, please update before launching the game"
-      );
-
-      return;
-    }
-    if (this.state.isGameLaunching) {
-      console.log("Game launch already in progress");
+      console.error("handleLaunchGame: failed to get fresh account info:", error);
+      this.showErrorModal(this.t("ERROR"), this.t("SERVER_CONNECTION_ERROR") || "Session expired. Please log in again.");
       return;
     }
 
+    // Step 2: ALWAYS check for updates before launching
+    if (UPDATE_CHECK_ENABLED) {
+      this.setState({ isCheckingForUpdates: true, currentUpdateMode: "file_check" });
+      this.updateLaunchGameButton(true);
+      try {
+        const filesToUpdate = await invoke("get_files_to_update");
+        console.log("handleLaunchGame: files to update:", filesToUpdate.length);
+        if (filesToUpdate.length > 0) {
+          // Set flag so handleCompletion auto-launches after download
+          // Keep button disabled — runPatchSystem handles state and re-enables when done
+          this.setState({ shouldLaunchAfterUpdate: true });
+          await this.runPatchSystem(filesToUpdate);
+          return; // handleCompletion will launch the game
+        }
+      } catch (error) {
+        console.error("handleLaunchGame: update check failed:", error);
+      } finally {
+        this.setState({ isCheckingForUpdates: false });
+        this.updateLaunchGameButton(false);
+      }
+    }
+
+    // Step 3: No updates needed — proceed to launch
     this.setState({ isGameLaunching: true });
 
     let isMaintenance = false;
@@ -1591,6 +1688,10 @@ const App = {
    * @memberof App
    */
   updateLaunchGameButton(disabled) {
+    // Refresh stale reference in case DOM was re-rendered
+    if (!this.launchGameBtn) {
+      this.launchGameBtn = document.querySelector("#launch-game-btn");
+    }
     if (this.launchGameBtn) {
       this.launchGameBtn.disabled = disabled;
       this.launchGameBtn.classList.toggle("disabled", disabled);
@@ -2234,8 +2335,11 @@ const App = {
       },
     });
 
+    console.log("initHome: Setting up home page elements and listeners");
     this.setupHomePageElements();
     this.setupHomePageEventListeners();
+    // Also re-setup window controls after home page loads to ensure buttons are ready
+    this.setupWindowControls();
     await this.initializeHomePageComponents();
   },
 
@@ -2249,8 +2353,18 @@ const App = {
    * @returns {void}
    */
   setupHomePageElements() {
-    this.launchGameBtn = document.querySelector("#launch-game-btn");
+    const newBtn = document.querySelector("#launch-game-btn");
+    const buttonChanged = newBtn !== this.launchGameBtn;
+    
+    // Update references FIRST with new elements from DOM
+    this.launchGameBtn = newBtn;
     this.statusEl = document.querySelector("#game-status");
+    
+    // Only reset the flag if the button element has changed (was recreated in DOM)
+    if (buttonChanged) {
+      console.log("Button element changed, resetting listeners flag");
+      this.homePageListenersSetup = false;
+    }
   },
 
   /**
@@ -2263,32 +2377,42 @@ const App = {
    * @returns {void}
    */
   setupHomePageEventListeners() {
-    if (this.launchGameBtn) {
-      this.launchGameBtn.addEventListener("click", () =>
-        this.handleLaunchGame()
-      );
+    console.log("setupHomePageEventListeners: Setting up home page listeners");
+    
+    const launchGameBtn = document.querySelector("#launch-game-btn");
+    console.log("setupHomePageEventListeners: Launch game button found?", launchGameBtn !== null);
+    
+    if (launchGameBtn) {
+      // Clear any existing listeners
+      launchGameBtn.onclick = null;
+      
+      // Direct onclick handler
+      launchGameBtn.onclick = (e) => {
+        console.log("🎮 LAUNCH GAME CLICKED");
+        this.handleLaunchGame();
+      };
+      
+      console.log("✓ Launch game button listener registered");
     }
 
     const logoutButton = document.getElementById("logout-link");
     if (logoutButton) {
-      logoutButton.addEventListener("click", async (e) => {
+      logoutButton.onclick = async (e) => {
         console.log("Logout button clicked");
         e.preventDefault();
         await this.logout();
-      });
+      };
     }
 
     const generateHashFileBtn = document.getElementById("generate-hash-file");
     if (generateHashFileBtn && this.checkPrivilegeLevel()) {
       generateHashFileBtn.style.display = "block";
-      generateHashFileBtn.addEventListener("click", () =>
-        this.generateHashFile()
-      );
+      generateHashFileBtn.onclick = () => this.generateHashFile();
     }
 
     const appQuitButton = document.getElementById("app-quit");
     if (appQuitButton) {
-      appQuitButton.addEventListener("click", () => this.appQuit());
+      appQuitButton.onclick = () => this.appQuit();
     }
   },
 
@@ -2836,23 +2960,51 @@ const App = {
    * to allow the user to interact with the window.
    */
   setupWindowControls() {
+    console.log("setupWindowControls() CALLED - Registering window control listeners");
+    
     // Game logs
     const appDebugBtn = document.getElementById("debug-button");
     if (appDebugBtn) {
-      appDebugBtn.addEventListener("click", () =>
-        this.toggleModal("log-modal", true)
-      );
+      console.log("✓ debug-button found, setting onclick");
+      appDebugBtn.onclick = () => this.toggleModal("log-modal", true);
+    } else {
+      console.warn("❌ debug-button NOT found in DOM");
+    }
+
+    // Force file verification / repair button
+    const repairBtn = document.getElementById("repair-button");
+    console.log("setupWindowControls: repair-button element found?", repairBtn !== null);
+    if (repairBtn) {
+      console.log("✓ repair-button FOUND, setting onclick handler");
+      // Clear any previous handler
+      repairBtn.onclick = null;
+      
+      repairBtn.onclick = () => {
+        console.log("🔧 REPAIR BUTTON CLICKED! Calling forceFileVerification()");
+        this.forceFileVerification();
+      };
+      console.log("✓ repair-button listener registered successfully");
+    } else {
+      console.error("❌ repair-button NOT found in DOM");
     }
 
     const appMinimizeBtn = document.getElementById("app-minimize");
     if (appMinimizeBtn) {
-      appMinimizeBtn.addEventListener("click", () => appWindow.minimize());
+      console.log("✓ app-minimize found, setting onclick");
+      appMinimizeBtn.onclick = () => appWindow.minimize();
+    } else {
+      console.warn("❌ app-minimize NOT found");
     }
 
     const appCloseBtn = document.getElementById("app-close");
     if (appCloseBtn) {
-      appCloseBtn.addEventListener("click", () => this.appQuit());
+      console.log("✓ app-close found, setting onclick");
+      appCloseBtn.onclick = () => this.appQuit();
+    } else {
+      console.warn("❌ app-close NOT found");
     }
+    
+    console.log("setupWindowControls() COMPLETED");
   },
 
   /**
@@ -3128,6 +3280,37 @@ const App = {
   },
 
   /**
+   * Clears the update cache and forces a complete file verification on next check.
+   * This is useful when the user wants to ensure all files are re-verified.
+   */
+  async clearUpdateCache() {
+    try {
+      console.log("Clearing update cache...");
+      this.showLoadingModal("Clearing cache and forcing file verification...");
+      
+      await invoke("clear_update_cache");
+      
+      console.log("Update cache cleared successfully");
+      this.hideLoadingModal();
+      
+      // Trigger a new update check to verify all files from scratch
+      console.log("Forcing update verification...");
+      await this.checkForUpdates();
+      
+      this.showInfoModal(
+        this.t("SUCCESS") || "Success",
+        this.t("CACHE_CLEARED") || "Cache cleared. Files will be re-verified."
+      );
+    } catch (error) {
+      console.error("Error clearing cache:", error);
+      this.showErrorModal(
+        this.t("ERROR") || "Error",
+        this.t("CACHE_CLEAR_FAILED") || "Failed to clear cache: " + error
+      );
+    }
+  },
+
+  /**
    * Close the app window.
    *
    * This function is called when the app needs to be closed, such as when the user
@@ -3226,3 +3409,4 @@ window.App = App;
 
 // Initialize the app when the DOM is fully loaded
 window.addEventListener("DOMContentLoaded", () => App.init());
+

@@ -188,6 +188,23 @@ table {
   transform: scale(1.2);
 }
 
+.titlebar-button {
+  height: 16px;
+  width: 16px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transform: scale(1);
+  transition: all 0.15s ease-in;
+  color: currentColor;
+}
+
+.titlebar-button:hover {
+  transform: scale(1.2);
+}
+
 .app-btn-content,
 .header1,
 .app-btn {

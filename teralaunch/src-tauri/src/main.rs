@@ -183,6 +183,11 @@ struct FileCheckProgress {
   files_to_update: usize,
 }
 
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct GetFilesToUpdateParams {
+  force: Option<bool>,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct CachedFileInfo {
@@ -255,10 +260,16 @@ fn calculate_file_hash<P: AsRef<Path>>(path: P) -> Result<String, String> {
 }
 
 fn get_cache_file_path() -> Result<PathBuf, String> {
-  let mut path = std::env::current_exe().map_err(|e| e.to_string())?;
-  path.pop();
-  path.push("file_cache.json");
-  Ok(path)
+  // Get the directory where config.ini is located
+  let config_path = find_config_file()
+    .ok_or("Config file not found - cannot determine cache directory")?;
+  
+  // Get the parent directory of config.ini
+  let cache_dir = config_path.parent()
+    .ok_or("Failed to get config directory")?;
+  
+  // Create cache file path in the same directory as config.ini
+  Ok(cache_dir.join("file_cache.json"))
 }
 
 fn save_cache_to_disk(cache: &HashMap<String, CachedFileInfo>) -> Result<(), String> {
@@ -281,10 +292,6 @@ fn load_cache_from_disk() -> Result<HashMap<String, CachedFileInfo>, String> {
 
 fn get_hash_file_url() -> String {
   get_config_value("HASH_FILE_URL")
-}
-
-fn get_files_server_url() -> String {
-  get_config_value("FILE_SERVER_URL")
 }
 
 fn find_config_file() -> Option<PathBuf> {
@@ -621,6 +628,22 @@ fn get_game_path_from_config() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn clear_update_cache() -> Result<(), String> {
+  println!("Clearing update cache");
+  let cache_path = get_cache_file_path()?;
+  
+  if cache_path.exists() {
+    std::fs::remove_file(&cache_path)
+      .map_err(|e| format!("Failed to delete cache file: {}", e))?;
+    println!("Cache file deleted successfully");
+    Ok(())
+  } else {
+    println!("Cache file does not exist");
+    Ok(())
+  }
+}
+
+#[tauri::command]
 async fn check_update_required(window: tauri::Window) -> Result<bool, String> {
   match get_files_to_update(window).await {
     Ok(files) => Ok(!files.is_empty()),
@@ -810,7 +833,7 @@ async fn download_all_files(
 
 #[tauri::command]
 async fn get_files_to_update(window: tauri::Window) -> Result<Vec<FileInfo>, String> {
-  println!("Starting get_files_to_update");
+  println!("Starting get_files_to_update (normal - using cache)");
 
   let start_time = Instant::now();
   let server_hash_file = get_server_hash_file().await?;
@@ -975,6 +998,149 @@ async fn get_files_to_update(window: tauri::Window) -> Result<Vec<FileInfo>, Str
   Ok(files_to_update)
 }
 
+#[tauri::command]
+async fn get_files_to_update_force(window: tauri::Window) -> Result<Vec<FileInfo>, String> {
+  println!("Starting get_files_to_update_force (FORCE MODE - ignoring cache)");
+
+  let start_time = Instant::now();
+  let server_hash_file = get_server_hash_file().await?;
+
+  // Get the path to the game folder, which is the folder that contains the Tera game
+  // files. This is the folder that we will be comparing with the server hash file
+  // to determine which files need to be updated.
+  let local_game_path = get_game_path()?;
+  println!("Local game path: {:?}", local_game_path);
+
+  println!("Attempting to read server hash file");
+  let files = server_hash_file["files"].as_array().ok_or("Invalid server hash file format")?;
+  println!("Server hash file parsed, {} files found", files.len());
+
+  println!("Starting file comparison (FORCE MODE - empty cache)");
+  // In force mode, we use an empty cache so all files are rechecked
+  let _cache: HashMap<String, CachedFileInfo> = HashMap::new();
+  let cache = Arc::new(RwLock::new(_cache));
+
+  let progress_bar = ProgressBar::new(files.len() as u64);
+  progress_bar.set_style(ProgressStyle::default_bar()
+    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
+    .unwrap()
+    .progress_chars("##-"));
+
+  let processed_count = Arc::new(AtomicUsize::new(0));
+  let files_to_update_count = Arc::new(AtomicUsize::new(0));
+  let total_size = Arc::new(AtomicU64::new(0));
+
+  let files_to_update: Vec<FileInfo> = files.par_iter().enumerate()
+    .filter_map(|(_index, file_info)| {
+      let path = file_info["path"].as_str().unwrap_or("");
+      let server_hash = file_info["hash"].as_str().unwrap_or("");
+      let size = file_info["size"].as_u64().unwrap_or(0);
+      let url = file_info["url"].as_str().unwrap_or("").to_string();
+
+      let local_file_path = local_game_path.join(path);
+
+      let current_count = processed_count.fetch_add(1, Ordering::SeqCst) + 1;
+      if current_count % 100 == 0 || current_count == files.len() {
+        let progress_payload = FileCheckProgress {
+          current_file: path.to_string(),
+          progress: (current_count as f64 / files.len() as f64) * 100.0,
+          current_count,
+          total_files: files.len(),
+          elapsed_time: start_time.elapsed().as_secs_f64(),
+          files_to_update: files_to_update_count.load(Ordering::SeqCst),
+        };
+
+        let _ = window.emit("file_check_progress", progress_payload)
+          .map_err(|e| {
+            println!("Error emitting file_check_progress event: {}", e);
+            e.to_string()
+          });
+      }
+
+      progress_bar.inc(1);
+
+      if !local_file_path.exists() {
+        files_to_update_count.fetch_add(1, Ordering::SeqCst);
+        total_size.fetch_add(size, Ordering::SeqCst);
+        return Some(FileInfo {
+          path: path.to_string(),
+          hash: server_hash.to_string(),
+          size,
+          url,
+        });
+      }
+
+      let metadata = match fs::metadata(&local_file_path) {
+        Ok(m) => m,
+        Err(_) => {
+          files_to_update_count.fetch_add(1, Ordering::SeqCst);
+          total_size.fetch_add(size, Ordering::SeqCst);
+          return Some(FileInfo {
+            path: path.to_string(),
+            hash: server_hash.to_string(),
+            size,
+            url,
+          });
+        }
+      };
+
+      let local_hash = match calculate_file_hash(&local_file_path) {
+        Ok(hash) => hash,
+        Err(_) => {
+          files_to_update_count.fetch_add(1, Ordering::SeqCst);
+          total_size.fetch_add(size, Ordering::SeqCst);
+          return Some(FileInfo {
+            path: path.to_string(),
+            hash: server_hash.to_string(),
+            size,
+            url,
+          });
+        }
+      };
+
+      // In force mode, even if hashes match, we mark the file as needing update
+      // to force a complete rebuild of the cache
+      if server_hash == local_hash {
+        // Update cache with current file info (this rebuilds the cache)
+        cache.write().unwrap().insert(path.to_string(), CachedFileInfo {
+          hash: server_hash.to_string(),
+          last_modified: metadata.modified().unwrap_or(SystemTime::now()),
+        });
+        None
+      } else {
+        files_to_update_count.fetch_add(1, Ordering::SeqCst);
+        total_size.fetch_add(size, Ordering::SeqCst);
+        Some(FileInfo {
+          path: path.to_string(),
+          hash: server_hash.to_string(),
+          size,
+          url,
+        })
+      }
+    })
+    .collect();
+
+  progress_bar.finish_with_message("File comparison completed");
+
+  // Save the rebuilt cache
+  let cache_data = cache.read().unwrap().clone();
+  let _ = save_cache_to_disk(&cache_data);
+
+  println!("File comparison completed. Files to update: {}", files_to_update.len());
+
+  let total_time = start_time.elapsed();
+  window.emit("file_check_completed", json!({
+    "success": true,
+    "total_files": files.len(),
+    "files_to_update": files_to_update.len(),
+    "total_size": total_size.load(Ordering::SeqCst),
+    "elapsed_time": total_time.as_secs_f64(),
+    "average_time_per_file_ms": (total_time.as_millis() as f64) / (files.len() as f64)
+  })).ok();
+
+  Ok(files_to_update)
+}
+
 
 #[tauri::command]
 async fn get_game_status(state: tauri::State<'_, GameState>) -> Result<bool, String> {
@@ -988,49 +1154,118 @@ async fn handle_launch_game(
   app_handle: tauri::AppHandle,
   state: tauri::State<'_, GameState>
 ) -> Result<String, String> {
-  println!("Total time: {:?}", 3);
+  println!("handle_launch_game: Starting");
+  
+  // Step 1: Check if game is already launching or running
   let mut is_launching = state.is_launching.lock().await;
   if *is_launching {
+    println!("handle_launch_game: Already launching");
     return Err("Game is already launching".to_string());
   }
   *is_launching = true;
 
   let is_running = *state.status_receiver.lock().await.borrow();
-
   if is_running {
+    println!("handle_launch_game: Game already running");
     *is_launching = false;
     return Err("Game is already running".to_string());
   }
 
-  let auth_info = GLOBAL_AUTH_INFO.read().unwrap();
-  let account_name = auth_info.user_no.to_string();
-  let characters_count = auth_info.character_count.clone();
-  let ticket = auth_info.auth_key.clone();
-  let (game_path, game_lang) = load_config()?;
-
-
-  let acts_map_clone: HashMap<String, String> = {
-      let acts_map_guard = GLOBAL_ACTS_MAP.read().unwrap();
-      acts_map_guard.clone()
+  // Step 2: Validate and retrieve authentication info
+  println!("handle_launch_game: Validating authentication info");
+  let (account_name, characters_count, ticket) = {
+    let auth_info = GLOBAL_AUTH_INFO.read()
+      .map_err(|e| {
+        *is_launching = false;
+        format!("Failed to read auth info: {}", e)
+      })?;
+    
+    // Validate all required fields are present and non-empty
+    if auth_info.auth_key.is_empty() {
+      *is_launching = false;
+      return Err("Auth key is missing. Please login again.".to_string());
+    }
+    
+    if auth_info.user_no <= 0 {
+      *is_launching = false;
+      return Err("Invalid user number. Please login again.".to_string());
+    }
+    
+    if auth_info.character_count.is_empty() {
+      *is_launching = false;
+      return Err("Character count is missing. Please login again.".to_string());
+    }
+    
+    println!("handle_launch_game: Auth validation successful for user_no: {}", auth_info.user_no);
+    (
+      auth_info.user_no.to_string(),
+      auth_info.character_count.clone(),
+      auth_info.auth_key.clone()
+    )
   };
-  let pages_map_clone: HashMap<String, String> = {
-      let pages_map_guard = GLOBAL_PAGES_MAP.read().unwrap();
-      pages_map_guard.clone()
+
+  // Step 3: Load and validate game configuration
+  let (game_path, game_lang) = match load_config() {
+    Ok(config) => config,
+    Err(e) => {
+      *is_launching = false;
+      return Err(format!("Failed to load game config: {}", e));
+    }
   };
-  info!("Sending actsMap andpagesMap to teralib...");
-
-  let full_game_path = game_path.join("Binaries").join("Tera.exe");
-
-  if !full_game_path.exists() {
+  
+  println!("handle_launch_game: Game path: {:?}, lang: {}", game_path, game_lang);
+  
+  if !game_path.exists() {
     *is_launching = false;
-    return Err(format!("Game executable not found at: {:?}", full_game_path));
+    return Err(format!("Game path does not exist: {:?}", game_path));
   }
 
-  let full_game_path_str = full_game_path
-    .to_str()
-    .ok_or("Invalid path to game executable")?
-    .to_string();
+  // Step 4: Validate game executable exists
+  let full_game_path = game_path.join("Binaries").join("Tera.exe");
+  if !full_game_path.exists() {
+    *is_launching = false;
+    return Err(format!("Game executable not found at: {:?}. Please verify your game installation.", full_game_path));
+  }
 
+  let full_game_path_str = match full_game_path.to_str() {
+    Some(path_str) => path_str.to_string(),
+    None => {
+      *is_launching = false;
+      return Err("Invalid characters in game executable path".to_string());
+    }
+  };
+
+  // Step 5: Retrieve and validate ACTS_MAP and PAGES_MAP
+  let (acts_map_clone, pages_map_clone) = {
+    let acts_map_guard = GLOBAL_ACTS_MAP.read()
+      .map_err(|e| {
+        *is_launching = false;
+        format!("Failed to read ACTS_MAP: {}", e)
+      })?;
+    
+    let pages_map_guard = GLOBAL_PAGES_MAP.read()
+      .map_err(|e| {
+        *is_launching = false;
+        format!("Failed to read PAGES_MAP: {}", e)
+      })?;
+    
+    if acts_map_guard.is_empty() {
+      println!("Warning: ACTS_MAP is empty");
+    }
+    
+    if pages_map_guard.is_empty() {
+      println!("Warning: PAGES_MAP is empty");
+    }
+    
+    println!("handle_launch_game: ACTS_MAP entries: {}, PAGES_MAP entries: {}", 
+      acts_map_guard.len(), 
+      pages_map_guard.len()
+    );
+    
+    (acts_map_guard.clone(), pages_map_guard.clone())
+  };
+
+  // Step 6: Spawn the game launch in background
   let app_handle_clone = app_handle.clone();
   let is_launching_clone = Arc::clone(&state.is_launching);
 
@@ -1040,7 +1275,7 @@ async fn handle_launch_game(
       error!("Failed to emit game_status_changed event: {:?}", e);
     }
 
-    info!("run_game reached");
+    info!("Launching game with executable: {}", full_game_path_str);
     match
       run_game(
         &account_name,
@@ -1510,14 +1745,70 @@ fn extract_maps_from_html(
 
 #[tauri::command]
 async fn check_server_connection() -> Result<bool, String> {
-  let client = Client::builder()
-    .timeout(Duration::from_secs(10))
-    .build()
-    .map_err(|e| e.to_string())?;
-
-  match client.get(get_files_server_url()).send().await {
-    Ok(response) => Ok(response.status().is_success()),
-    Err(e) => Err(e.to_string()),
+  // Step 1: Validate that we have an authenticated session with complete credentials
+  let auth_valid = {
+    let auth_info = GLOBAL_AUTH_INFO.read()
+      .map_err(|e| format!("Failed to read auth info: {}", e))?;
+    
+    let is_complete = 
+      !auth_info.auth_key.is_empty() &&
+      auth_info.user_no > 0 &&
+      !auth_info.user_name.is_empty() &&
+      !auth_info.character_count.is_empty();
+    
+    if !is_complete {
+      println!("Auth info incomplete: auth_key={}, user_no={}, user_name={}, char_count={}", 
+        !auth_info.auth_key.is_empty(),
+        auth_info.user_no,
+        !auth_info.user_name.is_empty(),
+        !auth_info.character_count.is_empty()
+      );
+      return Err("Authentication is incomplete. Please login again.".to_string());
+    }
+    
+    println!("Auth info valid and complete for user: {}", auth_info.user_name);
+    true
+  };
+  
+  if !auth_valid {
+    return Err("Authentication validation failed".to_string());
+  }
+  
+  // Step 2: Verify we have an authenticated HTTP client
+  let client_guard = AUTHENTICATED_CLIENT.lock().await;
+  let client = match &*client_guard {
+    Some(client) => client,
+    None => {
+      println!("No authenticated HTTP client available");
+      return Err("No authenticated session found. Please login again.".to_string());
+    }
+  };
+  
+  // Step 3: Attempt actual connection to server using a simple request
+  let hash_file_url = get_hash_file_url();
+  println!("Attempting server connection to: {}", hash_file_url);
+  
+  match client.get(&hash_file_url).send().await {
+    Ok(response) => {
+      let status = response.status();
+      println!("Server connection check: status {}", status);
+      
+      if status.is_success() {
+        Ok(true)
+      } else if status.is_client_error() {
+        // 4xx errors might indicate auth issues
+        Err(format!("Server returned client error: {}", status))
+      } else if status.is_server_error() {
+        // 5xx errors indicate server issues
+        Err(format!("Server returned server error: {}", status))
+      } else {
+        Err(format!("Unexpected server response: {}", status))
+      }
+    },
+    Err(e) => {
+      println!("Server connection check failed: {}", e);
+      Err(format!("Failed to connect to server: {}", e))
+    }
   }
 }
 
@@ -1529,21 +1820,35 @@ fn get_client_version() -> Result<String, String> {
 #[tauri::command]
 async fn get_fresh_account_info() -> Result<String, String> {
   let client_guard = AUTHENTICATED_CLIENT.lock().await;
-  if let Some(client) = &*client_guard {
-    // We have an authenticated client, fetch fresh data
-    
-    let base_url = &*LAUNCHER_BASE_URL;
-
-    // --- Step 1: GET /launcher/GetAccountInfoAction ---
-    let account_info_url = format!("{}/launcher/GetAccountInfoAction", base_url);
-    let account_info: AccountInfoResponse = client
-      .get(&account_info_url)
-      .send()
-      .await
-      .map_err(|e| format!("(Re-check) Failed to get account info: {}", e))?
-      .json()
-      .await
-      .map_err(|e| format!("(Re-check) Failed to parse account info: {}", e))?;
+  let client = match &*client_guard {
+    Some(client) => {
+      println!("get_fresh_account_info: Authenticated client found");
+      client
+    },
+    None => {
+      println!("get_fresh_account_info: No authenticated client available");
+      return Err("User session expired. Please login again.".to_string());
+    }
+  };
+  
+  let base_url = &*LAUNCHER_BASE_URL;
+  
+  // Step 2: Fetch account info from server
+  println!("get_fresh_account_info: Fetching account info");
+  let account_info_url = format!("{}/launcher/GetAccountInfoAction", base_url);
+  let account_info: AccountInfoResponse = client
+    .get(&account_info_url)
+    .send()
+    .await
+    .map_err(|e| format!("Failed to connect to account info endpoint: {}", e))?
+    .json()
+    .await
+    .map_err(|e| format!("Failed to parse account info response: {}", e))?;
+  
+  if account_info.user_no <= 0 {
+    return Err("Invalid user number received from server".to_string());
+  }
+  println!("get_fresh_account_info: Account info retrieved for user_no: {}", account_info.user_no);
 
     // --- Step 2: GET /launcher/GetAuthKeyAction ---
     // Request a new AuthKey so that the Node.js backend knows we’re still active
@@ -1564,75 +1869,80 @@ async fn get_fresh_account_info() -> Result<String, String> {
       .get(&char_count_url)
       .send()
       .await
-      .map_err(|e| format!("(Re-check) Failed to get char count: {}", e))?
+      .map_err(|e| format!("Failed to connect to character count endpoint: {}", e))?
       .json()
       .await
-      .map_err(|e| format!("(Re-check) Failed to parse char count: {}", e))?;
+      .map_err(|e| format!("Failed to parse character count response: {}", e))?;
+    
+    if char_count.character_count.is_empty() {
+      return Err("Server returned empty character count".to_string());
+    }
 
     // actsMap & pagesMap refresh
-    info!("Refreshing ActsMap and PagesMap for existing session...");
-    let main_url = format!("{}/launcher/Main", base_url); 
+    println!("get_fresh_account_info: Refreshing ACTS_MAP and PAGES_MAP");
+    let main_url = format!("{}/launcher/Main?locale=en", base_url);  
     
     let main_res = client
       .get(&main_url)
       .send()
       .await
-      .map_err(|e| format!("(Re-check) Failed to get launcher main page: {}", e))?;
+      .map_err(|e| format!("Failed to fetch launcher main page: {}", e))?;
 
     if !main_res.status().is_success() {
-      return Err(format!("(Re-check) Launcher main page request failed with status: {}", main_res.status()));
+      return Err(format!("Launcher main page returned error status: {}", main_res.status()));
     }
 
-    let main_html = main_res.text().await.map_err(|e| format!("(Re-check) Failed to read main page body: {}", e))?;
+    let main_html = main_res.text().await.map_err(|e| format!("Failed to read launcher main page: {}", e))?;
     let (acts_map, pages_map) = extract_maps_from_html(&main_html, base_url)?;
 
     if let Some(map_object) = pages_map.as_object() {
-        let mut pages_map_guard = GLOBAL_PAGES_MAP.write().unwrap();
+        let mut pages_map_guard = GLOBAL_PAGES_MAP.write()
+          .map_err(|e| format!("Failed to write PAGES_MAP: {}", e))?;
         pages_map_guard.clear();
         for (key, value) in map_object {
             if let Some(url_str) = value.as_str() {
                 pages_map_guard.insert(key.clone(), url_str.to_string());
             }
         }
-        info!("(Re-check) Stored GLOBAL_PAGES_MAP with {} entries", pages_map_guard.len());
+        println!("get_fresh_account_info: PAGES_MAP updated with {} entries", pages_map_guard.len());
+    } else {
+      return Err("PAGES_MAP is not a valid object".to_string());
     }
 
     if let Some(map_object) = acts_map.as_object() {
-        let mut acts_map_guard = GLOBAL_ACTS_MAP.write().unwrap();
+        let mut acts_map_guard = GLOBAL_ACTS_MAP.write()
+          .map_err(|e| format!("Failed to write ACTS_MAP: {}", e))?;
         acts_map_guard.clear();
         for (key, value) in map_object {
             if let Some(url_str) = value.as_str() {
                 acts_map_guard.insert(key.clone(), url_str.to_string());
             }
         }
-        info!("(Re-check) Stored GLOBAL_ACTS_MAP with {} entries", acts_map_guard.len());
+        println!("get_fresh_account_info: ACTS_MAP updated with {} entries", acts_map_guard.len());
+    } else {
+      return Err("ACTS_MAP is not a valid object".to_string());
     }
 
     // --- Step 4: Combine all the data ---
     let combined_response = CombinedLoginResponse {
       return_value: true,
-      return_code: 0, // Not a login, so 0 is fine
+      return_code: 0,
       msg: "success".to_string(),
       character_count: char_count.character_count,
       permission: account_info.permission,
       privilege: account_info.privilege,
       user_no: account_info.user_no,
       user_name: account_info.user_name,
-      auth_key: auth_key.auth_key, // Use the new AuthKey!
+      auth_key: auth_key.auth_key,
       banned: account_info.banned,
       acts_map: None,
       pages_map: None,
       session_cookie: None, 
     };
     
-    // --- Step 5: Return the fresh data to JS ---
+    println!("get_fresh_account_info: Success - returning fresh account info");
     serde_json::to_string(&combined_response)
-      .map_err(|e| format!("Failed to serialize fresh info: {}", e))
-
-  } else {
-    // No client found — the user is not logged in or the session was lost.
-    Err("User is not authenticated (no client)".to_string())
-  }
+      .map_err(|e| format!("Failed to serialize response: {}", e))
 }
 
 
@@ -1674,7 +1984,7 @@ fn main() {
     ::default()
     .manage(game_state)
     .setup(|app| {
-      let _window = app.get_window("main").unwrap();
+      let window = app.get_window("main").unwrap();
       let app_handle = app.handle();
       println!("Tauri setup started");
 
@@ -1706,6 +2016,7 @@ fn main() {
         get_language_from_config,
         save_language_to_config,
         get_files_to_update,
+        get_files_to_update_force,
         update_file,
         handle_logout,
         generate_hash_file,
@@ -1715,6 +2026,7 @@ fn main() {
         get_client_version,
         check_maintenance_and_notify,
         get_fresh_account_info,
+        clear_update_cache,
       ]
     )
     .run(tauri::generate_context!())
