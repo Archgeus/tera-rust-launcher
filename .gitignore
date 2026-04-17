@@ -2,6 +2,7 @@
 /teralib/target
 /teralaunch/node_modules
 /teralaunch/target
+/autoupdater/target
 
 teralib/src/config/config.json
 teralaunch/config.ini

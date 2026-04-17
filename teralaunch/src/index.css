@@ -1451,3 +1451,64 @@ input[type="text"]::placeholder {
 .modal-close-button:hover {
     background-color: #555;
 }
+
+/* ─── Launcher update button – slow heartbeat ─────────────────────────────── */
+@keyframes launcher-heartbeat {
+  0%, 100% { transform: scale(1);    opacity: 1;    }
+  50%       { transform: scale(1.28); opacity: 0.72; }
+}
+
+#launcher-update-btn {
+  color: #ef4444;
+  animation: launcher-heartbeat 2.4s ease-in-out infinite;
+}
+
+#launcher-update-btn:hover {
+  animation: none;
+  transform: scale(1.2);
+  color: #ff6060;
+  background-color: rgba(239, 68, 68, 0.14);
+  cursor: pointer;
+}
+
+/* ─── Launcher version display – bottom-left ──────────────────────────────── */
+.launcher-version-display {
+  position: absolute;
+  bottom: 8px;
+  left: 12px;
+  font-size: 11px;
+  font-family: Raleway, sans-serif;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.28);
+  letter-spacing: 0.6px;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ─── Launcher update confirm modal ──────────────────────────────────────── */
+.launcher-update-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.modal-update-btn {
+  background-color: #c0392b !important;
+  border-color: #922b21 !important;
+}
+
+.modal-update-btn:hover {
+  background-color: #e74c3c !important;
+}
+
+.modal-secondary-btn {
+  background-color: rgba(255, 255, 255, 0.08) !important;
+  color: rgba(255, 255, 255, 0.65) !important;
+  border-color: #555 !important;
+}
+
+.modal-secondary-btn:hover {
+  background-color: rgba(255, 255, 255, 0.16) !important;
+  color: #fff !important;
+}

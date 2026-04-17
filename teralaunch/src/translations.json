@@ -64,7 +64,15 @@
     "START_TIME": "Heure de début :",
     "END_TIME": "Heure de fin :",
     "ACKNOWLEDGE": "OK",
-    "ACCOUNT_BANNED": "Compte bloqué. Veuillez contacter le support."
+    "ACCOUNT_BANNED": "Compte bloqué. Veuillez contacter le support.",
+    "LAUNCHER_UPDATE_TITLE": "Mise à jour du launcher disponible",
+    "LAUNCHER_UPDATE_MESSAGE": "Une nouvelle version du launcher {new_version} est disponible. Mettez à jour maintenant ou fermez — la mise à jour s'appliquera automatiquement au prochain lancement.",
+    "LAUNCHER_UPDATE_CONFIRM": "Mettre à jour maintenant",
+    "LAUNCHER_UPDATE_CANCEL": "Mettre à jour au prochain lancement",
+    "LAUNCHER_DOWNLOADING_UPDATE": "Téléchargement de la mise à jour du launcher... {progress}%",
+    "LAUNCHER_AUTOUPDATE_STARTING": "Nouvelle version du launcher détectée. Mise à jour automatique...",
+    "LAUNCHER_UPDATE_ERROR": "Échec de l'application de la mise à jour du launcher",
+    "LAUNCHER_UPDATE_BTN_TITLE": "Mise à jour du launcher disponible"
   },
   "EUR": {
     "LOGIN_TITLE": "Login",
@@ -131,7 +139,15 @@
     "START_TIME": "Start Time:",
     "END_TIME": "End Time:",
     "ACKNOWLEDGE": "OK",
-    "ACCOUNT_BANNED": "Account blocked. Please contact support."
+    "ACCOUNT_BANNED": "Account blocked. Please contact support.",
+    "LAUNCHER_UPDATE_TITLE": "Launcher Update Available",
+    "LAUNCHER_UPDATE_MESSAGE": "A new launcher version {new_version} is available. Update now or close and it will auto-update on your next launch.",
+    "LAUNCHER_UPDATE_CONFIRM": "Update Now",
+    "LAUNCHER_UPDATE_CANCEL": "Update on Next Launch",
+    "LAUNCHER_DOWNLOADING_UPDATE": "Downloading launcher update... {progress}%",
+    "LAUNCHER_AUTOUPDATE_STARTING": "New launcher version detected. Updating automatically...",
+    "LAUNCHER_UPDATE_ERROR": "Failed to apply launcher update",
+    "LAUNCHER_UPDATE_BTN_TITLE": "Launcher update available"
   },
   "RUS": {
     "LOGIN_TITLE": "Вход",
@@ -198,7 +214,15 @@
     "START_TIME": "Время начала:",
     "END_TIME": "Время окончания:",
     "ACKNOWLEDGE": "OK",
-    "ACCOUNT_BANNED": "Аккаунт заблокирован. Свяжитесь со службой поддержки."
+    "ACCOUNT_BANNED": "Аккаунт заблокирован. Свяжитесь со службой поддержки.",
+    "LAUNCHER_UPDATE_TITLE": "Доступно обновление лаунчера",
+    "LAUNCHER_UPDATE_MESSAGE": "Доступна новая версия лаунчера {new_version}. Обновите сейчас или закройте — при следующем запуске обновление применится автоматически.",
+    "LAUNCHER_UPDATE_CONFIRM": "Обновить сейчас",
+    "LAUNCHER_UPDATE_CANCEL": "Обновить при следующем запуске",
+    "LAUNCHER_DOWNLOADING_UPDATE": "Загрузка обновления лаунчера... {progress}%",
+    "LAUNCHER_AUTOUPDATE_STARTING": "Обнаружена новая версия лаунчера. Автоматическое обновление...",
+    "LAUNCHER_UPDATE_ERROR": "Не удалось применить обновление лаунчера",
+    "LAUNCHER_UPDATE_BTN_TITLE": "Доступно обновление лаунчера"
   },
   "GER": {
     "LOGIN_TITLE": "Anmelden",
@@ -265,6 +289,14 @@
     "START_TIME": "Startzeit:",
     "END_TIME": "Endzeit:",
     "ACKNOWLEDGE": "OK",
-    "ACCOUNT_BANNED": "Konto gesperrt. Bitte wenden Sie sich an den Support."
+    "ACCOUNT_BANNED": "Konto gesperrt. Bitte wenden Sie sich an den Support.",
+    "LAUNCHER_UPDATE_TITLE": "Launcher-Update verfügbar",
+    "LAUNCHER_UPDATE_MESSAGE": "Eine neue Launcher-Version {new_version} ist verfügbar. Jetzt aktualisieren oder schließen — beim nächsten Start wird automatisch aktualisiert.",
+    "LAUNCHER_UPDATE_CONFIRM": "Jetzt aktualisieren",
+    "LAUNCHER_UPDATE_CANCEL": "Beim nächsten Start aktualisieren",
+    "LAUNCHER_DOWNLOADING_UPDATE": "Launcher-Update wird heruntergeladen... {progress}%",
+    "LAUNCHER_AUTOUPDATE_STARTING": "Neue Launcher-Version erkannt. Automatisches Update läuft...",
+    "LAUNCHER_UPDATE_ERROR": "Launcher-Update konnte nicht angewendet werden",
+    "LAUNCHER_UPDATE_BTN_TITLE": "Launcher-Update verfügbar"
   }
 }

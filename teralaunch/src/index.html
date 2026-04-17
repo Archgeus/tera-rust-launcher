@@ -57,6 +57,9 @@
       </div>
       <div class="app-btn">
         <div class="app-btn-content">
+          <div class="titlebar-button" id="launcher-update-btn" data-translate-title="LAUNCHER_UPDATE_BTN_TITLE" title="Launcher update available" style="display: none;">
+            <i class="fa-solid fa-cloud-arrow-up"></i>
+          </div>
           <div class="titlebar-button" id="debug-button">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path
@@ -86,6 +89,7 @@
       </div>
     </header>
     <div id="app"></div>
+    <div id="launcher-version" class="launcher-version-display"></div>
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.11.4/gsap.min.js"></script>
@@ -127,6 +131,17 @@
         <p id="error-modal-message" class="maintenance-message">An unexpected error has occurred.</p>
         
         <button class="modal-close-button" data-translate="ACKNOWLEDGE">OK</button>
+    </div>
+  </div>
+
+  <div id="launcher-update-modal" class="custom-modal-backdrop" style="display: none;">
+    <div class="custom-modal-content">
+      <h2 class="modal-title" data-translate="LAUNCHER_UPDATE_TITLE">Launcher Update</h2>
+      <p id="launcher-update-message" class="maintenance-message" data-translate="LAUNCHER_UPDATE_MESSAGE">A new launcher version is available.</p>
+      <div class="launcher-update-actions">
+        <button id="launcher-update-confirm-btn" class="modal-close-button modal-update-btn" data-translate="LAUNCHER_UPDATE_CONFIRM">Update Now</button>
+        <button id="launcher-update-cancel-btn" class="modal-close-button modal-secondary-btn" data-translate="LAUNCHER_UPDATE_CANCEL">Later</button>
+      </div>
     </div>
   </div>
 

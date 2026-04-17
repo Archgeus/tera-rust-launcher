@@ -128,6 +128,11 @@ const App = {
         this.updateUI();
       });
 
+      // Check for launcher self-update on startup — auto-applies if found.
+      // Also starts the 5-minute periodic check.
+      this.checkLauncherUpdateOnStartup();
+      this.loadLauncherVersion();
+
       listen("maintenance_active", (event) => {
         console.log("Maintenance active event received:", event.payload);
         this.showMaintenanceModal(event.payload);
@@ -780,9 +785,10 @@ const App = {
     });
 
     if (elements.currentFile)
-      elements.currentFile.style.display = this.state.isUpdateAvailable
-        ? "flex"
-        : "none";
+      elements.currentFile.style.display =
+        (this.state.isUpdateAvailable || this.state.currentUpdateMode === "complete")
+          ? "flex"
+          : "none";
     if (elements.filesProgress)
       elements.filesProgress.style.display = this.state.isUpdateAvailable
         ? "inline"
@@ -988,6 +994,7 @@ const App = {
           isUpdateAvailable: false,
           isFileCheckComplete: true,
           currentUpdateMode: "complete",
+          currentFileName: "All done.",
         });
         // Re-enable elements if no update is needed
         this.updateLaunchGameButton(false);
@@ -998,7 +1005,7 @@ const App = {
         this.setupWindowControls();
         setTimeout(() => {
           this.setState({ currentUpdateMode: "ready" });
-        }, 1000);
+        }, 2000);
       } else {
         this.setState({
           isUpdateAvailable: true,
@@ -2273,6 +2280,11 @@ const App = {
       el.placeholder = this.t(key);
     });
 
+    document.querySelectorAll("[data-translate-title]").forEach((el) => {
+      const key = el.getAttribute("data-translate-title");
+      el.title = this.t(key);
+    });
+
     this.updateDynamicTranslations();
   },
 
@@ -3003,9 +3015,182 @@ const App = {
     } else {
       console.warn("❌ app-close NOT found");
     }
+
+    // Launcher update notification button
+    const launcherUpdateBtn = document.getElementById("launcher-update-btn");
+    if (launcherUpdateBtn) {
+      launcherUpdateBtn.onclick = () => {
+        if (this._launcherUpdateInfo) {
+          this.showLauncherUpdateModal(this._launcherUpdateInfo);
+        }
+      };
+    }
     
     console.log("setupWindowControls() COMPLETED");
   },
+
+  // ─── Launcher self-update ───────────────────────────────────────────────
+
+  /**
+   * Called once at startup.
+   * If an update is available → auto-applies immediately (no confirmation).
+   * If no update → starts the 5-minute periodic check.
+   */
+  async checkLauncherUpdateOnStartup() {
+    try {
+      const info = await invoke('check_launcher_update');
+      if (info.update_available) {
+        this._launcherUpdateInfo = info;
+        console.log(`Launcher update detected at startup: ${info.current_version} → ${info.new_version}. Auto-applying.`);
+        // Apply immediately — show a non-dismissable "Updating…" message
+        await this.applyLauncherUpdate(
+          info.installer_url,
+          info.autoupdater_url || '',
+          info.new_version,
+          /* autoUpdate */ true
+        );
+      } else {
+        // No update right now — start the periodic background check
+        this._startLauncherUpdatePolling();
+      }
+    } catch (e) {
+      console.warn('Launcher update check (startup) failed:', e);
+      // Still start polling so future checks can succeed
+      this._startLauncherUpdatePolling();
+    }
+  },
+
+  /**
+   * Starts a repeating check every 5 minutes.
+   * If an update is found it shows the red heartbeat button; it does NOT
+   * auto-apply (the user chose to keep using the launcher for now).
+   */
+  _startLauncherUpdatePolling() {
+    const INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+    if (this._launcherUpdatePollTimer) return; // already running
+    this._launcherUpdatePollTimer = setInterval(async () => {
+      try {
+        const info = await invoke('check_launcher_update');
+        if (info.update_available) {
+          this._launcherUpdateInfo = info;
+          const btn = document.getElementById('launcher-update-btn');
+          if (btn) {
+            btn.style.removeProperty('display');
+            btn.style.display = 'inline-flex';
+          }
+          console.log(`Launcher update found during polling: ${info.current_version} → ${info.new_version}`);
+        }
+      } catch (e) {
+        console.warn('Launcher update check (poll) failed:', e);
+      }
+    }, INTERVAL_MS);
+  },
+
+  /**
+   * Loads the launcher version number from `launcher_version.ini` (via backend)
+   * and displays it at the bottom-left of the window.
+   */
+  async loadLauncherVersion() {
+    try {
+      const version = await invoke('get_launcher_version');
+      const el = document.getElementById('launcher-version');
+      if (el) el.textContent = version;
+    } catch (e) {
+      console.warn('Failed to load launcher version:', e);
+    }
+  },
+
+  /**
+   * Shows the launcher update confirmation modal (used when the user manually
+   * clicks the red heartbeat button during a session).
+   * @param {{ current_version: string, new_version: string, installer_url: string, autoupdater_url: string }} updateInfo
+   */
+  showLauncherUpdateModal(updateInfo) {
+    const modal = document.getElementById('launcher-update-modal');
+    if (!modal) return;
+
+    const msgEl = document.getElementById('launcher-update-message');
+    if (msgEl) {
+      const template = this.t('LAUNCHER_UPDATE_MESSAGE');
+      msgEl.textContent = template
+        .replace('{new_version}', updateInfo.new_version)
+        .replace('{current_version}', updateInfo.current_version);
+    }
+
+    const titleEl = modal.querySelector('.maintenance-title, .modal-title');
+    if (titleEl) titleEl.textContent = this.t('LAUNCHER_UPDATE_TITLE');
+
+    const confirmBtn = document.getElementById('launcher-update-confirm-btn');
+    const cancelBtn  = document.getElementById('launcher-update-cancel-btn');
+
+    if (confirmBtn) {
+      confirmBtn.textContent = this.t('LAUNCHER_UPDATE_CONFIRM');
+      confirmBtn.onclick = () => this.applyLauncherUpdate(
+        updateInfo.installer_url,
+        updateInfo.autoupdater_url || '',
+        updateInfo.new_version
+      );
+    }
+    if (cancelBtn) {
+      cancelBtn.textContent = this.t('LAUNCHER_UPDATE_CANCEL');
+      cancelBtn.onclick = () => { modal.style.display = 'none'; };
+    }
+
+    modal.style.display = 'flex';
+  },
+
+  /**
+   * Downloads the new launcher exe (showing progress) then hands off
+   * to autoupdater.exe and exits.
+   * @param {string} installerUrl
+   * @param {string} autoupdaterUrl
+   * @param {string} newVersion
+   * @param {boolean} [autoUpdate=false]  true = startup auto-update (no cancel button shown)
+   */
+  async applyLauncherUpdate(installerUrl, autoupdaterUrl, newVersion, autoUpdate = false) {
+    const modal = document.getElementById('launcher-update-modal');
+    if (modal) modal.style.display = 'none';
+
+    const initialMsg = autoUpdate
+      ? this.t('LAUNCHER_AUTOUPDATE_STARTING')
+      : this.t('LAUNCHER_DOWNLOADING_UPDATE').replace('{progress}', '0');
+
+    this.showLoadingModal(initialMsg);
+
+    // Hide the cancel/quit buttons during an auto-update so the user can't abort
+    if (autoUpdate) {
+      const btns = document.querySelector('#loading-modal .loading-buttons');
+      if (btns) btns.style.display = 'none';
+    }
+
+    const unlisten = await listen('launcher_update_progress', (event) => {
+      const { progress } = event.payload;
+      if (this.loadingMessage) {
+        this.loadingMessage.textContent = this.t('LAUNCHER_DOWNLOADING_UPDATE')
+          .replace('{progress}', Math.round(progress));
+      }
+    });
+
+    try {
+      await invoke('apply_launcher_update', {
+        installerUrl,
+        autoupdaterUrl,
+        newVersion,
+      });
+      // Backend calls app.exit(0) — execution stops here
+    } catch (e) {
+      unlisten();
+      // Restore buttons if hidden
+      if (autoUpdate) {
+        const btns = document.querySelector('#loading-modal .loading-buttons');
+        if (btns) btns.style.display = '';
+      }
+      this.hideLoadingModal();
+      this.showErrorModal(this.t('ERROR'), `${this.t('LAUNCHER_UPDATE_ERROR')}: ${e}`);
+    }
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
 
   /**
    * Sets up the custom animations for the select element (dropdown menu) to give

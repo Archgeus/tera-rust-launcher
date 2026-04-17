@@ -1,0 +1,11 @@
+[package]
+name = "autoupdater"
+version = "1.0.0"
+edition = "2021"
+description = "Tera Launcher auto-updater helper"
+
+[[bin]]
+name = "autoupdater"
+path = "src/main.rs"
+
+[dependencies]

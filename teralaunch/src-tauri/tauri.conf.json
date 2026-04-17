@@ -4,10 +4,12 @@
     "distDir": "../src",
     "withGlobalTauri": true
   },
+
   "package": {
-    "productName": "teralauncher",
-    "version": "0.0.6"
+    "productName": "TeraLauncher",
+    "version": "1.0.4"
   },
+
   "tauri": {
     "allowlist": {
       "all": true,
@@ -40,8 +42,9 @@
         "icons/tera_server.png",
         "icons/tera_server.ico"
       ],
-      "copyright": "Tera Launcher",
-      "shortDescription": "A Tauri Launcher for Tera Pserver"
+      "copyright": "© 2026                                 TERA Private. All rights reserved.",
+      "shortDescription": "TERA Online Private Server Launcher",
+      "longDescription": "Custom launcher for TERA Online private server."
     }
   }
 }

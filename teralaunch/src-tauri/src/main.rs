@@ -463,6 +463,7 @@ async fn generate_hash_file(window: tauri::Window) -> Result<String, String> {
   let ignored_paths: HashSet<&str> = [
     "$Patch",
     "Binaries/cookies.dat",
+    "Binaries/awesomium.log",
     "S1Game/GuildFlagUpload",
     "S1Game/GuildLogoUpload",
     "S1Game/ImageCache",
@@ -481,6 +482,10 @@ async fn generate_hash_file(window: tauri::Window) -> Result<String, String> {
     "version.ini",
     "unins000.dat",
     "unins000.exe",
+    "config.ini",
+    "file_cache.json",
+    "hash-file.json",
+    "teralauncher.exe",
   ].iter().cloned().collect();
 
   let total_files = WalkDir::new(&game_path)
@@ -1945,6 +1950,357 @@ async fn get_fresh_account_info() -> Result<String, String> {
       .map_err(|e| format!("Failed to serialize response: {}", e))
 }
 
+// ─── Launcher self-update ────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct LauncherUpdateInfo {
+  update_available: bool,
+  current_version: String,
+  new_version: String,
+  installer_url: String,
+  autoupdater_url: String,
+}
+
+/// Compare two dot-separated version strings (e.g. "1.0.1.52" vs "0.0.6").
+/// Returns true when `remote` is strictly newer than `local`.
+fn is_newer_version(remote: &str, local: &str) -> bool {
+  let parse = |v: &str| -> Vec<u32> {
+    v.split('.').filter_map(|p| p.parse().ok()).collect()
+  };
+  let r = parse(remote);
+  let l = parse(local);
+  let len = r.len().max(l.len());
+  for i in 0..len {
+    let rv = r.get(i).copied().unwrap_or(0);
+    let lv = l.get(i).copied().unwrap_or(0);
+    if rv > lv { return true; }
+    if rv < lv { return false; }
+  }
+  false
+}
+
+/// Returns the path to `launcher_version.ini` in the same directory as the .exe.
+fn get_launcher_version_file_path() -> Result<PathBuf, String> {
+  let exe_path = env::current_exe()
+    .map_err(|e| format!("Failed to get exe path: {}", e))?;
+  let exe_dir = exe_path.parent()
+    .ok_or("Failed to get exe directory")?;
+  Ok(exe_dir.join("launcher_version.ini"))
+}
+
+/// Always writes `compiled_version` to `launcher_version.ini`, overwriting any
+/// stale value that may have been left by a different (older/newer) binary.
+/// This guarantees the file always reflects what is actually running.
+fn read_or_create_launcher_version(compiled_version: &str) -> Result<String, String> {
+  let ver_path = get_launcher_version_file_path()?;
+
+  // Overwrite unconditionally — the compiled version IS the truth.
+  let mut conf = Ini::new();
+  conf.with_section(Some("LAUNCHER"))
+    .set("version", compiled_version);
+  let mut file = File::create(&ver_path)
+    .map_err(|e| format!("Failed to write launcher_version.ini: {}", e))?;
+  conf.write_to(&mut file)
+    .map_err(|e| format!("Failed to write launcher_version.ini: {}", e))?;
+  info!("launcher_version.ini synced to compiled version: {}", compiled_version);
+
+  Ok(compiled_version.to_string())
+}
+
+/// Return the local launcher version (reads launcher_version.ini, creates if missing).
+#[tauri::command]
+fn get_launcher_version(app: tauri::AppHandle) -> Result<String, String> {
+  let compiled = app.package_info().version.to_string();
+  read_or_create_launcher_version(&compiled)
+}
+
+/// Fetch `{LAUNCHER_ACTION_URL}/public/patch/launcher_info.ini`, parse the
+/// [LAUNCHER] section and compare with the local `launcher_version.ini`.
+/// Creates `launcher_version.ini` from the compiled version if it does not exist.
+#[tauri::command]
+async fn check_launcher_update(app: tauri::AppHandle) -> Result<LauncherUpdateInfo, String> {
+  let base_url = &*LAUNCHER_BASE_URL;
+  let info_url = format!("{}/public/patch/launcher_info.ini", base_url);
+
+  let client = reqwest::Client::new();
+  let response = client
+    .get(&info_url)
+    .send()
+    .await
+    .map_err(|e| format!("Failed to fetch launcher_info.ini: {}", e))?;
+
+  if !response.status().is_success() {
+    return Err(format!("Server returned {} for launcher_info.ini", response.status()));
+  }
+
+  let text = response
+    .text()
+    .await
+    .map_err(|e| format!("Failed to read launcher_info.ini: {}", e))?;
+
+  let ini = Ini::load_from_str(&text)
+    .map_err(|e| format!("Failed to parse launcher_info.ini: {}", e))?;
+
+  let section = ini
+    .section(Some("LAUNCHER"))
+    .ok_or("Missing [LAUNCHER] section in launcher_info.ini")?;
+
+  let server_version = section
+    .get("version")
+    .ok_or("Missing 'version' key in launcher_info.ini")?
+    .to_string();
+
+  let installer_url = section
+    .get("installer_url")
+    .ok_or("Missing 'installer_url' key in launcher_info.ini")?
+    .to_string();
+
+  let autoupdater_url = section
+    .get("autoupdater_url")
+    .unwrap_or("")
+    .to_string();
+
+  // Use the compiled package version as fallback when creating the local file
+  let compiled_version = app.package_info().version.to_string();
+  let local_version = read_or_create_launcher_version(&compiled_version)?;
+
+  let update_available = is_newer_version(&server_version, &local_version);
+
+  Ok(LauncherUpdateInfo {
+    update_available,
+    current_version: local_version,
+    new_version: server_version,
+    installer_url,
+    autoupdater_url,
+  })
+}
+
+/// Fetch `launcher_info.ini` and download `autoupdater.exe` next to the launcher
+/// if it isn't already present. Called silently in the background at startup.
+async fn ensure_autoupdater() -> Result<(), String> {
+  let exe_path = std::env::current_exe()
+    .map_err(|e| format!("Failed to get exe path: {}", e))?;
+  let exe_dir = exe_path.parent().ok_or("Failed to get exe directory")?;
+  let autoupdater = exe_dir.join("autoupdater.exe");
+
+  if autoupdater.exists() {
+    info!("ensure_autoupdater: already present, skipping download.");
+    return Ok(());
+  }
+
+  let base_url = &*LAUNCHER_BASE_URL;
+  let info_url = format!("{}/public/patch/launcher_info.ini", base_url);
+
+  let client = reqwest::Client::new();
+  let text = client
+    .get(&info_url)
+    .send()
+    .await
+    .map_err(|e| format!("Failed to fetch launcher_info.ini: {}", e))?
+    .text()
+    .await
+    .map_err(|e| format!("Failed to read launcher_info.ini: {}", e))?;
+
+  let ini = Ini::load_from_str(&text)
+    .map_err(|e| format!("Failed to parse launcher_info.ini: {}", e))?;
+
+  let autoupdater_url = ini
+    .section(Some("LAUNCHER"))
+    .and_then(|s| s.get("autoupdater_url"))
+    .unwrap_or("")
+    .to_string();
+
+  if autoupdater_url.is_empty() {
+    return Err("launcher_info.ini has no autoupdater_url — skipping download.".to_string());
+  }
+
+  info!("ensure_autoupdater: downloading from {}", autoupdater_url);
+
+  let resp = client
+    .get(&autoupdater_url)
+    .send()
+    .await
+    .map_err(|e| format!("Failed to download autoupdater.exe: {}", e))?;
+
+  if !resp.status().is_success() {
+    return Err(format!("autoupdater.exe download returned status {}", resp.status()));
+  }
+
+  let bytes = resp
+    .bytes()
+    .await
+    .map_err(|e| format!("Failed to read autoupdater.exe bytes: {}", e))?;
+
+  tokio::fs::write(&autoupdater, &bytes)
+    .await
+    .map_err(|e| format!("Failed to save autoupdater.exe: {}", e))?;
+
+  info!(
+    "ensure_autoupdater: saved {} bytes to {}",
+    bytes.len(),
+    autoupdater.display()
+  );
+  Ok(())
+}
+
+/// Download the new launcher exe, then hand off to autoupdater.exe and exit.
+///
+/// Emits `"launcher_update_progress"` events while downloading:
+/// `{ progress: f64 (0-100), downloaded: u64, total: u64 }`
+#[tauri::command]
+async fn apply_launcher_update(
+  installer_url: String,
+  autoupdater_url: String,
+  new_version: String,
+  app: tauri::AppHandle,
+) -> Result<(), String> {
+  let client = reqwest::Client::new();
+
+  // ── 1. Resolve path to the launcher exe (this is the file we'll replace) ─
+  let exe_path = std::env::current_exe()
+    .map_err(|e| format!("Failed to resolve launcher exe path: {}", e))?;
+  let exe_dir = exe_path
+    .parent()
+    .ok_or("Failed to get launcher directory")?;
+
+  // ── 2. Ensure autoupdater.exe is present; download it if needed ──────────
+  let autoupdater = exe_dir.join("autoupdater.exe");
+
+  info!("apply_launcher_update: autoupdater path = {}", autoupdater.display());
+  info!("apply_launcher_update: autoupdater_url  = '{}'", autoupdater_url);
+  info!("apply_launcher_update: installer_url    = '{}'", installer_url);
+  info!("apply_launcher_update: new_version      = '{}'", new_version);
+
+  if !autoupdater.exists() {
+    if autoupdater_url.is_empty() {
+      return Err(format!(
+        "autoupdater.exe not found at '{}'. Rebuild the launcher so autoupdater_url is passed, or place autoupdater.exe manually.",
+        autoupdater.display()
+      ));
+    }
+
+    info!("autoupdater.exe not found — downloading from {}", autoupdater_url);
+    let au_response = client
+      .get(&autoupdater_url)
+      .send()
+      .await
+      .map_err(|e| format!("Failed to download autoupdater.exe: {}", e))?;
+
+    if !au_response.status().is_success() {
+      return Err(format!(
+        "autoupdater.exe download failed with status: {}",
+        au_response.status()
+      ));
+    }
+
+    let au_bytes = au_response
+      .bytes()
+      .await
+      .map_err(|e| format!("Failed to read autoupdater.exe response: {}", e))?;
+
+    tokio::fs::write(&autoupdater, &au_bytes)
+      .await
+      .map_err(|e| format!("Failed to save autoupdater.exe: {}", e))?;
+
+    info!("autoupdater.exe downloaded successfully");
+  }
+
+  // ── 3. Download the new launcher exe to %TEMP%\launcher_update\ ──────────
+  let response = client
+    .get(&installer_url)
+    .send()
+    .await
+    .map_err(|e| format!("Failed to start launcher download: {}", e))?;
+
+  if !response.status().is_success() {
+    return Err(format!("Launcher download failed with status: {}", response.status()));
+  }
+
+  let total_size = response.content_length().unwrap_or(0);
+
+  let temp_dir = std::env::temp_dir().join("launcher_update");
+  fs::create_dir_all(&temp_dir)
+    .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+
+  let filename = installer_url
+    .split('/')
+    .last()
+    .filter(|s| !s.is_empty())
+    .unwrap_or("TeraLauncher_new.exe");
+
+  let new_launcher_path = temp_dir.join(filename);
+
+  let mut dest = tokio::fs::File::create(&new_launcher_path)
+    .await
+    .map_err(|e| format!("Failed to create temp launcher file: {}", e))?;
+
+  let mut downloaded: u64 = 0;
+  let mut stream = response.bytes_stream();
+
+  while let Some(chunk) = stream.next().await {
+    let chunk = chunk.map_err(|e| format!("Download stream error: {}", e))?;
+    dest
+      .write_all(&chunk)
+      .await
+      .map_err(|e| format!("Failed to write chunk: {}", e))?;
+    downloaded += chunk.len() as u64;
+
+    let progress = if total_size > 0 {
+      (downloaded as f64 / total_size as f64) * 100.0
+    } else {
+      0.0
+    };
+
+    let _ = app.emit_all(
+      "launcher_update_progress",
+      json!({ "progress": progress, "downloaded": downloaded, "total": total_size }),
+    );
+  }
+
+  dest.flush().await.map_err(|e| format!("Failed to flush temp launcher file: {}", e))?;
+  drop(dest);
+
+  // ── 4. Get current PID so autoupdater can wait for us to exit ─────────────
+  let launcher_pid = std::process::id();
+
+  // ── 5. Spawn autoupdater (hidden window) then exit the launcher ───────────
+  //  Args: <new_exe_path> <launcher_pid> <target_exe_path> <new_version>
+  let new_launcher_str = new_launcher_path
+    .to_str()
+    .ok_or("Invalid temp launcher path (non-UTF-8)")?;
+  let target_exe_str = exe_path
+    .to_str()
+    .ok_or("Invalid launcher exe path (non-UTF-8)")?;
+
+  #[cfg(target_os = "windows")]
+  {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    std::process::Command::new(&autoupdater)
+      .arg(new_launcher_str)
+      .arg(launcher_pid.to_string())
+      .arg(target_exe_str)
+      .arg(&new_version)
+      .creation_flags(CREATE_NO_WINDOW)
+      .spawn()
+      .map_err(|e| format!("Failed to spawn autoupdater: {}", e))?;
+  }
+  #[cfg(not(target_os = "windows"))]
+  {
+    std::process::Command::new(&autoupdater)
+      .arg(new_launcher_str)
+      .arg(launcher_pid.to_string())
+      .arg(target_exe_str)
+      .arg(&new_version)
+      .spawn()
+      .map_err(|e| format!("Failed to spawn autoupdater: {}", e))?;
+  }
+
+  app.exit(0);
+  Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 fn main() {
 
@@ -1991,10 +2347,31 @@ fn main() {
       #[cfg(debug_assertions)]
       window.open_devtools();
 
+      // Ensure the window is visible and focused regardless of how the process
+      // was spawned (e.g. by autoupdater.exe which may pass a minimized show-state).
+      let _ = window.unminimize();
+      let _ = window.show();
+      let _ = window.set_focus();
+
       // Spawn an asynchronous task to receive logs from the channel and send them to the frontend
       tauri::async_runtime::spawn(async move {
         while let Some(log_message) = log_receiver.recv().await {
           let _ = app_handle.emit_all("log_message", log_message);
+        }
+      });
+
+      // Sync launcher_version.ini with the compiled version immediately at startup.
+      // This overwrites any stale version left by a mismatched binary.
+      let compiled_ver = app.package_info().version.to_string();
+      if let Err(e) = read_or_create_launcher_version(&compiled_ver) {
+        info!("Failed to sync launcher_version.ini at startup: {}", e);
+      }
+
+      // Silently ensure autoupdater.exe is present beside the launcher exe.
+      // Fetches launcher_info.ini to get autoupdater_url, then downloads if needed.
+      tauri::async_runtime::spawn(async {
+        if let Err(e) = ensure_autoupdater().await {
+          info!("ensure_autoupdater (startup): {}", e);
         }
       });
 
@@ -2027,6 +2404,9 @@ fn main() {
         check_maintenance_and_notify,
         get_fresh_account_info,
         clear_update_cache,
+        check_launcher_update,
+        apply_launcher_update,
+        get_launcher_version,
       ]
     )
     .run(tauri::generate_context!())
