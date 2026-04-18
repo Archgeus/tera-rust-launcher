@@ -135,6 +135,55 @@ The compiled version (from `tauri.conf.json` → `package.version`) is always tr
 
 ---
 
+> [!IMPORTANT]  
+> In order to make work the launcher SignUp and Captcha, you need to do the following changes into TeraApi
+
+Line 513
+
+Change
+
+```
+if (req.session.captchaVerified) {
+			next();
+		} else {
+			next(new ApiError("Captcha error", 15));
+		}
+```
+
+to
+
+```
+if (!captcha || req.session.captchaVerified) {
+			next();
+		} else {
+			next(new ApiError("Captcha error", 15));
+		}
+```
+
+Add in Line 1041 in src\controllers\portalLauncher.controller.js
+
+```
+module.exports.GetPortalConfig = () => [
+	/**
+	 * @type {RequestHandler}
+	 */
+	(req, res) => {
+		res.json({
+			registrationDisabled: isRegistrationDisabled,
+			captchaEnabled: captcha !== null
+		});
+	}
+];
+```
+
+Add in line 164
+
+```
+.get("/GetPortalConfig", portalLauncherController.GetPortalConfig(mod))
+```
+
+With this changes the Launcher will know when the SignUp and Captcha is enabled/disabled based on the TeraApi configuration.
+
 ## Note
 This launcher is a custom solution and not officially associated with Tera Online or its publishers.
 

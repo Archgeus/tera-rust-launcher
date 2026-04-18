@@ -44,6 +44,7 @@ const App = {
     currentSpeed: 0,
     timeRemaining: 0,
     isLoggingIn: false,
+    isSigningUp: false,
     isLoggingOut: false,
     isGameRunning: false,
     gameExecutionFailed: false,
@@ -2307,6 +2308,318 @@ const App = {
         await this.login(username, password);
       });
     }
+
+    this.initSignup();
+  },
+
+  async initSignup() {
+    console.log("Initializing signup");
+    this.isCaptchaVerified = false;
+    this.captchaEnabled = true;
+
+    // Fetch portal config to determine feature flags
+    try {
+      const configStr = await invoke("get_portal_config");
+      const config = JSON.parse(configStr);
+
+      // If registration is disabled, hide the signup tab entirely
+      if (config.registrationDisabled) {
+        const tabSignup = document.getElementById("tab-signup");
+        if (tabSignup) tabSignup.style.display = "none";
+        return;
+      }
+
+      this.captchaEnabled = config.captchaEnabled;
+    } catch (err) {
+      console.warn("Could not fetch portal config, using defaults:", err);
+    }
+
+    const captchaContainer = document.getElementById("captcha-container");
+    if (captchaContainer) {
+      captchaContainer.style.display = this.captchaEnabled ? "" : "none";
+    }
+    if (!this.captchaEnabled) {
+      this.isCaptchaVerified = true;
+      // Initialize signup session even when captcha is disabled
+      try {
+        await invoke("init_signup_session");
+      } catch (err) {
+        console.warn("Could not initialize signup session:", err);
+      }
+    }
+
+    const tabLogin = document.getElementById("tab-login");
+    const tabSignup = document.getElementById("tab-signup");
+    const panelLogin = document.getElementById("panel-login");
+    const panelSignup = document.getElementById("panel-signup");
+
+    if (tabLogin && tabSignup) {
+      tabLogin.addEventListener("click", () => {
+        tabLogin.classList.add("active");
+        tabSignup.classList.remove("active");
+        panelLogin.classList.add("active");
+        panelSignup.classList.remove("active");
+      });
+
+      tabSignup.addEventListener("click", () => {
+        tabSignup.classList.add("active");
+        tabLogin.classList.remove("active");
+        panelSignup.classList.add("active");
+        panelLogin.classList.remove("active");
+        if (this.captchaEnabled && !this.isCaptchaVerified) {
+          this.loadCaptcha();
+        }
+      });
+    }
+
+    const signupButton = document.getElementById("signup-button");
+    if (signupButton) {
+      signupButton.addEventListener("click", async (e) => {
+        e.preventDefault();
+        const username = document.getElementById("signup-username").value;
+        const email = document.getElementById("signup-email").value;
+        const password = document.getElementById("signup-password").value;
+        const confirmPassword = document.getElementById("signup-confirm-password").value;
+        await this.signup(username, email, password, confirmPassword);
+      });
+    }
+
+    const reloadBtn = document.getElementById("captcha-reload-btn");
+    if (reloadBtn) {
+      reloadBtn.addEventListener("click", () => this.loadCaptcha());
+    }
+  },
+
+  async loadCaptcha() {
+    this.isCaptchaVerified = false;
+    const captchaLoading = document.getElementById("captcha-loading");
+    const captchaPuzzle = document.getElementById("captcha-puzzle");
+    const captchaStatus = document.getElementById("captcha-status");
+
+    if (!captchaLoading || !captchaPuzzle) return;
+
+    captchaLoading.style.display = "block";
+    captchaPuzzle.style.display = "none";
+
+    // Reset slider fill and block image position from any previous attempt
+    const sliderFillReset = document.getElementById("captcha-slider-fill");
+    const blockImgReset = document.getElementById("captcha-block-img");
+    const sliderBtnReset = document.getElementById("captcha-slider-btn");
+    if (sliderFillReset) sliderFillReset.style.width = "0px";
+    if (blockImgReset) blockImgReset.style.left = "0px";
+    if (sliderBtnReset) sliderBtnReset.style.left = "0px";
+
+    try {
+      const responseStr = await invoke("get_captcha");
+      const response = JSON.parse(responseStr);
+
+      const bgImg = document.getElementById("captcha-bg-img");
+      const blockImg = document.getElementById("captcha-block-img");
+      if (bgImg) bgImg.src = response.image;
+      if (blockImg) {
+        blockImg.src = response.block;
+        blockImg.style.left = "0px";
+      }
+
+      captchaLoading.style.display = "none";
+      captchaPuzzle.style.display = "block";
+
+      if (captchaStatus) {
+        captchaStatus.textContent = "";
+        captchaStatus.className = "captcha-status";
+      }
+
+      // Defer slider init so the browser has time to lay out the puzzle
+      requestAnimationFrame(() => this.initCaptchaSlider());
+    } catch (err) {
+      console.error("Failed to load captcha:", err);
+      if (captchaLoading) captchaLoading.textContent = this.t("SERVER_CONNECTION_ERROR");
+    }
+  },
+
+  initCaptchaSlider() {
+    const sliderBtn = document.getElementById("captcha-slider-btn");
+    const sliderTrack = document.getElementById("captcha-slider-track");
+    const sliderFill = document.getElementById("captcha-slider-fill");
+    const blockImg = document.getElementById("captcha-block-img");
+    const imagesWrapper = document.getElementById("captcha-puzzle")?.querySelector(".captcha-images-wrapper");
+
+    if (!sliderBtn || !sliderTrack || !imagesWrapper) return;
+
+    // The image display width is the scale reference (maps to 280 image px)
+    const displayWidth = imagesWrapper.offsetWidth;
+    if (displayWidth === 0) {
+      // Layout not ready yet, try again next frame
+      requestAnimationFrame(() => this.initCaptchaSlider());
+      return;
+    }
+
+    // Clone to remove any previous listeners
+    const newBtn = sliderBtn.cloneNode(true);
+    newBtn.style.pointerEvents = "";
+    newBtn.style.left = "0px";
+    newBtn.style.background = "";
+    sliderBtn.parentNode.replaceChild(newBtn, sliderBtn);
+
+    let isDragging = false;
+    let currentPos = 0;
+
+    const getMaxSlide = () =>
+      Math.max(0, sliderTrack.offsetWidth - newBtn.offsetWidth);
+
+    const updatePos = (clientX) => {
+      const trackRect = sliderTrack.getBoundingClientRect();
+      let pos = clientX - trackRect.left - newBtn.offsetWidth / 2;
+      pos = Math.max(0, Math.min(pos, getMaxSlide()));
+      currentPos = pos;
+      newBtn.style.left = `${pos}px`;
+      if (sliderFill) sliderFill.style.width = `${pos + newBtn.offsetWidth}px`;
+      if (blockImg) {
+        // Block image is 280px-wide content scaled to displayWidth.
+        // Move it the same display pixels as the slider position.
+        blockImg.style.left = `${pos}px`;
+      }
+    };
+
+    const onMouseMove = (e) => {
+      if (!isDragging) return;
+      updatePos(e.clientX);
+    };
+
+    const onMouseUp = async () => {
+      if (!isDragging) return;
+      isDragging = false;
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+
+      const captchaStatus = document.getElementById("captcha-status");
+      // Convert display px → image px (0..280) using the image container width
+      const scaledAnswer = displayWidth > 0
+        ? Math.round(currentPos * 280 / displayWidth)
+        : 0;
+
+      try {
+        const verified = await invoke("verify_captcha", { answer: scaledAnswer });
+        if (verified) {
+          if (captchaStatus) {
+            captchaStatus.textContent = this.t("CAPTCHA_VERIFIED");
+            captchaStatus.className = "captcha-status captcha-success";
+          }
+          this.isCaptchaVerified = true;
+          newBtn.style.pointerEvents = "none";
+        } else {
+          if (captchaStatus) {
+            captchaStatus.textContent = this.t("CAPTCHA_FAILED");
+            captchaStatus.className = "captcha-status captcha-error";
+          }
+          this.isCaptchaVerified = false;
+          setTimeout(() => this.loadCaptcha(), 1000);
+        }
+      } catch (err) {
+        console.error("Captcha verify error:", err);
+        if (captchaStatus) {
+          captchaStatus.textContent = this.t("SERVER_CONNECTION_ERROR");
+          captchaStatus.className = "captcha-status captcha-error";
+        }
+        setTimeout(() => this.loadCaptcha(), 1500);
+      }
+    };
+
+    newBtn.addEventListener("mousedown", (e) => {
+      isDragging = true;
+      e.preventDefault();
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+    });
+  },
+
+  async signup(username, email, password, confirmPassword) {
+    const signupErrorMsg = document.getElementById("signup-error-msg");
+    const signupSuccessMsg = document.getElementById("signup-success-msg");
+    const signupButton = document.getElementById("signup-button");
+
+    if (signupErrorMsg) signupErrorMsg.classList.remove("active");
+    if (signupSuccessMsg) signupSuccessMsg.classList.remove("active");
+
+    const showError = (msg) => {
+      if (signupErrorMsg) {
+        signupErrorMsg.textContent = msg;
+        signupErrorMsg.classList.add("active");
+      }
+    };
+
+    // Client-side validation
+    if (!username || username.length < 3 || username.length > 24 || !/^[a-zA-Z0-9]+$/.test(username)) {
+      showError(this.t("SIGNUP_ERROR_11"));
+      return;
+    }
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      showError(this.t("SIGNUP_ERROR_12"));
+      return;
+    }
+    if (!password || password.length < 8 || password.length > 128) {
+      showError(this.t("SIGNUP_ERROR_13"));
+      return;
+    }
+    if (password !== confirmPassword) {
+      showError(this.t("PASSWORD_MISMATCH"));
+      return;
+    }
+    if (this.captchaEnabled && !this.isCaptchaVerified) {
+      showError(this.t("SIGNUP_ERROR_15"));
+      return;
+    }
+
+    if (this.state.isSigningUp) return;
+    this.setState({ isSigningUp: true });
+
+    if (signupButton) {
+      signupButton.disabled = true;
+      signupButton.textContent = this.t("SIGNUP_IN_PROGRESS");
+    }
+
+    try {
+      const responseStr = await invoke("signup", { login: username, email, password });
+      const response = JSON.parse(responseStr);
+
+      if (response && response.Return && response.Msg === "success") {
+        if (signupSuccessMsg) {
+          signupSuccessMsg.textContent = this.t("SIGNUP_SUCCESS");
+          signupSuccessMsg.classList.add("active");
+        }
+        // Clear all inputs
+        ["signup-username", "signup-email", "signup-password", "signup-confirm-password"].forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.value = "";
+        });
+        // Reset captcha state and reload a fresh one (only if captcha is enabled)
+        this.isCaptchaVerified = !this.captchaEnabled;
+        if (this.captchaEnabled) this.loadCaptcha();
+        // Switch to login tab after a short delay
+        setTimeout(() => {
+          document.getElementById("tab-login")?.click();
+          if (signupSuccessMsg) signupSuccessMsg.classList.remove("active");
+        }, 2500);
+      } else {
+        const code = response?.ReturnCode;
+        const errorKey = `SIGNUP_ERROR_${code}`;
+        const errorMsg = this.t(errorKey) !== errorKey ? this.t(errorKey) : this.t("SIGNUP_ERROR_DEFAULT");
+        showError(errorMsg);
+        if (code === 15 && this.captchaEnabled) {
+          this.isCaptchaVerified = false;
+          setTimeout(() => this.loadCaptcha(), 500);
+        }
+      }
+    } catch (err) {
+      console.error("Signup error:", err);
+      showError(this.t("SERVER_CONNECTION_ERROR"));
+    } finally {
+      this.setState({ isSigningUp: false });
+      if (signupButton) {
+        signupButton.disabled = false;
+        signupButton.textContent = this.t("SIGNUP_BUTTON");
+      }
+    }
   },
 
   /**
@@ -3328,9 +3641,10 @@ const App = {
    * considered authenticated, otherwise they are not.
    */
   checkAuthentication() {
-    this.setState({
-      isAuthenticated: localStorage.getItem("authKey") !== null,
-    });
+    const authenticated = localStorage.getItem("authKey") !== null;
+    this.setState({ isAuthenticated: authenticated });
+    const repairBtn = document.getElementById("repair-button");
+    if (repairBtn) repairBtn.style.display = authenticated ? "" : "none";
   },
 
   /**

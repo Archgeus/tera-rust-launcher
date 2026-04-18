@@ -1,6 +1,6 @@
 {
     "LAUNCHER_ACTION_URL": "http://127.0.0.1:8090",
-    "HASH_FILE_URL": "http://127.0.0.1:8090/tera/launcher/hash-file.json",
+    "HASH_FILE_URL": "http://127.0.0.1:8090/public/launcher/hash-file.json",
     "FILE_SERVER_URL": "http://127.0.0.1:8090/public",
     "SERVER_LIST_URL": "http://127.0.0.1:8090/tera/ServerList.json?lang=en&sort=3",
     "CLIENT_VERSION": "46.05"

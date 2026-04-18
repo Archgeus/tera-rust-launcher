@@ -53,6 +53,8 @@ lazy_static! {
 
   static ref AUTHENTICATED_CLIENT: Mutex<Option<Client>> = Mutex::new(None);
 
+  static ref SIGNUP_SESSION_CLIENT: Mutex<Option<Client>> = Mutex::new(None);
+
   static ref LAUNCHER_BASE_URL: String = get_config_value("LAUNCHER_ACTION_URL");
 
   static ref GLOBAL_ACTS_MAP: RwLock<HashMap<String, String>> = RwLock::new(HashMap::new());
@@ -112,6 +114,32 @@ struct MaintenanceResponse {
   start_time: Option<u64>,
   #[serde(rename = "EndTime")]
   end_time: Option<u64>,
+}
+
+// Struct for GET /launcher/GetCaptcha verify response
+#[derive(Deserialize)]
+struct CaptchaVerifyApiResponse {
+    verified: bool,
+}
+
+// Struct for POST /launcher/SignupAction response
+#[derive(Deserialize, Serialize)]
+struct SignupApiResponse {
+    #[serde(rename = "Return")]
+    return_value: bool,
+    #[serde(rename = "ReturnCode")]
+    return_code: i32,
+    #[serde(rename = "Msg")]
+    msg: String,
+}
+
+// Struct for GET /launcher/GetPortalConfig response
+#[derive(Deserialize, Serialize)]
+struct PortalConfigResponse {
+    #[serde(rename = "registrationDisabled", default)]
+    registration_disabled: bool,
+    #[serde(rename = "captchaEnabled", default)]
+    captcha_enabled: bool,
 }
 
 // This struct combines all info into the format the frontend expects (same as old LoginResponse)
@@ -2300,6 +2328,155 @@ async fn apply_launcher_update(
   Ok(())
 }
 
+// ── Signup / Captcha commands ─────────────────────────────────────────────────
+
+/// Fetches a new slider captcha from the server.
+/// Initializes a plain session client without calling the captcha endpoint.
+/// Used when captcha is disabled so that signup still has a valid session client.
+#[tauri::command]
+async fn init_signup_session() -> Result<(), String> {
+  let client = Client::builder()
+    .cookie_store(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+  let mut client_guard = SIGNUP_SESSION_CLIENT.lock().await;
+  *client_guard = Some(client);
+  Ok(())
+}
+
+/// Creates a fresh session client (with cookie jar) stored globally so that
+/// the subsequent verify_captcha and signup calls share the same session.
+#[tauri::command]
+async fn get_captcha() -> Result<String, String> {
+  let cookie_jar = Arc::new(Jar::default());
+  let client = Client::builder()
+    .cookie_store(true)
+    .cookie_provider(Arc::clone(&cookie_jar))
+    .build()
+    .map_err(|e| e.to_string())?;
+
+  let base_url = &*LAUNCHER_BASE_URL;
+  let captcha_url = format!("{}/launcher/GetCaptcha", base_url);
+
+  let res = client
+    .get(&captcha_url)
+    .send()
+    .await
+    .map_err(|e| format!("Failed to get captcha: {}", e))?;
+
+  if !res.status().is_success() {
+    return Err(format!("Captcha request failed with status: {}", res.status()));
+  }
+
+  let body: serde_json::Value = res
+    .json()
+    .await
+    .map_err(|e| format!("Failed to parse captcha response: {}", e))?;
+
+  let mut client_guard = SIGNUP_SESSION_CLIENT.lock().await;
+  *client_guard = Some(client);
+
+  serde_json::to_string(&body)
+    .map_err(|e| format!("Failed to serialize captcha: {}", e))
+}
+
+/// Posts the slider answer to the captcha endpoint, using the same session
+/// created in get_captcha. Returns true if the server accepted the answer.
+#[tauri::command]
+async fn verify_captcha(answer: i32) -> Result<bool, String> {
+  let client_guard = SIGNUP_SESSION_CLIENT.lock().await;
+  let client = client_guard
+    .as_ref()
+    .ok_or_else(|| "No signup session. Call get_captcha first.".to_string())?;
+
+  let base_url = &*LAUNCHER_BASE_URL;
+  let captcha_url = format!("{}/launcher/GetCaptcha", base_url);
+  let answer_str = answer.to_string();
+
+  let res = client
+    .post(&captcha_url)
+    .form(&[("answer", answer_str.as_str())])
+    .send()
+    .await
+    .map_err(|e| format!("Failed to verify captcha: {}", e))?;
+
+  if !res.status().is_success() {
+    return Err(format!("Captcha verify failed with status: {}", res.status()));
+  }
+
+  let verify_res: CaptchaVerifyApiResponse = res
+    .json()
+    .await
+    .map_err(|e| format!("Failed to parse captcha verify response: {}", e))?;
+
+  Ok(verify_res.verified)
+}
+
+/// Submits the signup form to the backend. Requires captcha to have been
+/// verified first (the same session client must carry captchaVerified = true).
+#[tauri::command]
+async fn signup(login: String, email: String, password: String) -> Result<String, String> {
+  let client_guard = SIGNUP_SESSION_CLIENT.lock().await;
+  let client = client_guard
+    .as_ref()
+    .ok_or_else(|| "No signup session. Complete captcha first.".to_string())?;
+
+  let base_url = &*LAUNCHER_BASE_URL;
+  let signup_url = format!("{}/launcher/SignupAction", base_url);
+
+  let res = client
+    .post(&signup_url)
+    .form(&[
+      ("login", login.as_str()),
+      ("email", email.as_str()),
+      ("password", password.as_str()),
+    ])
+    .send()
+    .await
+    .map_err(|e| format!("Failed to submit signup: {}", e))?;
+
+  if !res.status().is_success() {
+    return Err(format!("Signup request failed with status: {}", res.status()));
+  }
+
+  let signup_res: SignupApiResponse = res
+    .json()
+    .await
+    .map_err(|e| format!("Failed to parse signup response: {}", e))?;
+
+  serde_json::to_string(&signup_res)
+    .map_err(|e| format!("Failed to serialize signup response: {}", e))
+}
+
+#[tauri::command]
+async fn get_portal_config() -> Result<String, String> {
+  let client = Client::new();
+  let base_url = &*LAUNCHER_BASE_URL;
+  let url = format!("{}/launcher/GetPortalConfig", base_url);
+
+  let res = match client.get(&url).send().await {
+    Ok(r) => r,
+    Err(_) => {
+      let default = PortalConfigResponse { registration_disabled: false, captcha_enabled: true };
+      return serde_json::to_string(&default).map_err(|e| e.to_string());
+    }
+  };
+
+  if !res.status().is_success() {
+    let default = PortalConfigResponse { registration_disabled: false, captcha_enabled: true };
+    return serde_json::to_string(&default).map_err(|e| e.to_string());
+  }
+
+  let config: PortalConfigResponse = res
+    .json()
+    .await
+    .map_err(|e| format!("Failed to parse portal config: {}", e))?;
+
+  serde_json::to_string(&config)
+    .map_err(|e| format!("Failed to serialize portal config: {}", e))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -2407,6 +2584,11 @@ fn main() {
         check_launcher_update,
         apply_launcher_update,
         get_launcher_version,
+        init_signup_session,
+        get_captcha,
+        verify_captcha,
+        signup,
+        get_portal_config,
       ]
     )
     .run(tauri::generate_context!())
