@@ -6,7 +6,7 @@
 // 3. If <new_version> is provided, writes it to launcher_version.ini next to the target exe.
 // 4. Launches the updated <target_exe_path>.
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 use std::env;
 use std::fs;
@@ -86,20 +86,38 @@ fn retry_copy(src: &str, dst: &str, attempts: u32) -> bool {
     false
 }
 
-/// Poll every second (up to 30 s) until the process with `pid` is no longer
-/// listed in the system process table, using the built-in `tasklist` command.
+/// Poll every second (up to 30 s) until the process with `pid` is no longer running.
 fn wait_for_pid(pid: u32) {
-    let pid_str = pid.to_string();
     for _ in 0..30 {
-        let running = Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&*pid_str))
-            .unwrap_or(false);
-
+        let running = is_pid_running(pid);
         if !running {
             break;
         }
         thread::sleep(Duration::from_secs(1));
+    }
+}
+
+#[cfg(windows)]
+fn is_pid_running(pid: u32) -> bool {
+    let pid_str = pid.to_string();
+    Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&*pid_str))
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn is_pid_running(pid: u32) -> bool {
+    // On Linux/macOS: /proc/<pid> exists while the process is alive;
+    // fall back to sending signal 0 if /proc is unavailable.
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new(&format!("/proc/{}", pid)).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // kill -0 returns Ok if process exists
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
 }

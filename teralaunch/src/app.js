@@ -159,7 +159,7 @@ const App = {
 
         const isConnected = await this.checkServerConnection();
         if (isConnected) {
-          this.checkFirstLaunch();
+          await this.checkFirstLaunch();
           if (this.state.isFirstLaunch) {
             await this.handleFirstLaunch();
           } else {
@@ -176,8 +176,23 @@ const App = {
   },
 
   // function to check if it's the first launch
-  checkFirstLaunch() {
-    const isFirstLaunch = localStorage.getItem("isFirstLaunch") !== "false";
+  async checkFirstLaunch() {
+    let isFirstLaunch = localStorage.getItem("isFirstLaunch") !== "false";
+    // If localStorage says first launch, also verify config.ini.
+    // On Linux, localStorage may not persist between sessions even though
+    // the game path was already saved to config.ini on a previous run.
+    if (isFirstLaunch) {
+      try {
+        const path = await invoke("get_game_path_from_config");
+        if (path && path.trim().length > 0) {
+          // Config already has a path — not actually first launch
+          isFirstLaunch = false;
+          localStorage.setItem("isFirstLaunch", "false");
+        }
+      } catch (_) {
+        // No config / no path — genuinely first launch
+      }
+    }
     this.setState({ isFirstLaunch });
   },
 
@@ -932,7 +947,7 @@ const App = {
 
     try {
       await this.initializeHomePage();
-      this.checkFirstLaunch();
+      await this.checkFirstLaunch();
       if (this.state.isFirstLaunch) {
         await this.handleFirstLaunch();
       } else {
@@ -2711,8 +2726,11 @@ const App = {
       // Clear any existing listeners
       launchGameBtn.onclick = null;
       
-      // Direct onclick handler
+      // Direct onclick handler.
+      // Guard on `.disabled` explicitly: WebKitGTK (Tauri/Linux) does not suppress
+      // onclick when the disabled attribute is set, unlike WebView2 on Windows.
       launchGameBtn.onclick = (e) => {
+        if (launchGameBtn.disabled) return;
         console.log("🎮 LAUNCH GAME CLICKED");
         this.handleLaunchGame();
       };
@@ -2924,7 +2942,7 @@ const App = {
     });
 
     // Event handler for the button
-    btnUserAvatar.addEventListener("click", (event) => {
+    btnUserAvatar.addEventListener("pointerdown", (event) => {
       event.stopPropagation();
       if (!isPanelOpen) {
         tl.play();
@@ -2934,8 +2952,11 @@ const App = {
       isPanelOpen = !isPanelOpen;
     });
 
-    // Close panel when clicking outside
-    document.addEventListener("click", () => {
+    // Close panel when clicking outside.
+    // Use "pointerdown" instead of "click" — WebKitGTK (Tauri on Linux) does not
+    // reliably fire "click" on non-interactive document areas, but always fires
+    // "pointerdown", which behaves identically on Windows/WebView2 as well.
+    document.addEventListener("pointerdown", () => {
       if (isPanelOpen) {
         tl.reverse();
         isPanelOpen = false;
@@ -2943,7 +2964,7 @@ const App = {
     });
 
     // Prevent closing when clicking inside the panel
-    dropdownPanelWrapper.addEventListener("click", (event) => {
+    dropdownPanelWrapper.addEventListener("pointerdown", (event) => {
       event.stopPropagation();
     });
 
@@ -3360,7 +3381,8 @@ const App = {
           info.installer_url,
           info.autoupdater_url || '',
           info.new_version,
-          /* autoUpdate */ true
+          /* autoUpdate */ true,
+          info.bridge_url || ''
         );
       } else {
         // No update right now — start the periodic background check
@@ -3416,7 +3438,7 @@ const App = {
   /**
    * Shows the launcher update confirmation modal (used when the user manually
    * clicks the red heartbeat button during a session).
-   * @param {{ current_version: string, new_version: string, installer_url: string, autoupdater_url: string }} updateInfo
+   * @param {{ current_version: string, new_version: string, installer_url: string, autoupdater_url: string, bridge_url: string }} updateInfo
    */
   showLauncherUpdateModal(updateInfo) {
     const modal = document.getElementById('launcher-update-modal');
@@ -3441,7 +3463,11 @@ const App = {
       confirmBtn.onclick = () => this.applyLauncherUpdate(
         updateInfo.installer_url,
         updateInfo.autoupdater_url || '',
-        updateInfo.new_version
+        updateInfo.new_version,
+        false,
+        updateInfo.bridge_url || '',
+        false,
+        updateInfo.bridge_url || ''
       );
     }
     if (cancelBtn) {
@@ -3459,8 +3485,9 @@ const App = {
    * @param {string} autoupdaterUrl
    * @param {string} newVersion
    * @param {boolean} [autoUpdate=false]  true = startup auto-update (no cancel button shown)
+   * @param {string}  [bridgeUrl='']     Linux only: URL to updated launcher-bridge.exe
    */
-  async applyLauncherUpdate(installerUrl, autoupdaterUrl, newVersion, autoUpdate = false) {
+  async applyLauncherUpdate(installerUrl, autoupdaterUrl, newVersion, autoUpdate = false, bridgeUrl = '') {
     const modal = document.getElementById('launcher-update-modal');
     if (modal) modal.style.display = 'none';
 
@@ -3489,6 +3516,7 @@ const App = {
         installerUrl,
         autoupdaterUrl,
         newVersion,
+        bridgeUrl,
       });
       // Backend calls app.exit(0) — execution stops here
     } catch (e) {

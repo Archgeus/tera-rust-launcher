@@ -1,32 +1,40 @@
-// External crate imports
-use crate::{
-    config,
-    global_credentials::{set_credentials, GLOBAL_CREDENTIALS},
-};
+// Cross-platform imports
+use crate::config;
+#[cfg(windows)]
 use lazy_static::lazy_static;
 use log::{error, info, Level, Metadata, Record};
+#[cfg(not(windows))]
+use log::warn;
 use once_cell::sync::Lazy;
+use std::{
+    collections::HashMap,
+    process::ExitStatus,
+    sync::atomic::{AtomicBool, Ordering},
+};
+use tokio::sync::{mpsc as other_mpsc, watch};
+
+// Windows-only imports
+#[cfg(windows)]
+use crate::global_credentials::{set_credentials, GLOBAL_CREDENTIALS};
+#[cfg(windows)]
 use prost::Message;
+#[cfg(windows)]
 use reqwest;
+#[cfg(windows)]
 use serde_json::Value;
+#[cfg(windows)]
 use std::{
     ffi::OsStr,
     os::windows::ffi::OsStrExt,
-    process::{Command, ExitStatus},
+    process::Command,
     ptr::null_mut,
     slice,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, {Arc, Mutex},
-        RwLock,
-    },
+    sync::{mpsc, Arc, Mutex, RwLock},
     time::Duration,
-    collections::HashMap,
 };
-use tokio::{
-    runtime::Runtime,
-    sync::{mpsc as other_mpsc, watch, Notify},
-};
+#[cfg(windows)]
+use tokio::{runtime::Runtime, sync::Notify};
+#[cfg(windows)]
 use winapi::{
     shared::{
         minwindef::{BOOL, LPARAM, LRESULT, TRUE, UINT, WPARAM},
@@ -39,7 +47,8 @@ use winapi::{
     },
 };
 
-// Constants
+// Windows-only constants
+#[cfg(windows)]
 const WM_GAME_EXITED: u32 = WM_USER + 1;
 
 /// Module for handling server list functionality.
@@ -47,15 +56,18 @@ const WM_GAME_EXITED: u32 = WM_USER + 1;
 /// This module includes the generated code from the `_serverlist_proto.rs` file,
 /// which likely contains protobuf-generated structures and functions for
 /// managing server list data.
+#[cfg(windows)]
 mod serverlist {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "\\src\\_serverlist_proto.rs"
     ));
 }
+#[cfg(windows)]
 use serverlist::{server_list::ServerInfo, ServerList};
 
-// Global static variables
+// Windows-only global static variables
+#[cfg(windows)]
 lazy_static! {
     static ref SERVER_LIST_SENDER: Mutex<Option<mpsc::Sender<(WPARAM, usize)>>> = Mutex::new(None);
 
@@ -63,10 +75,8 @@ lazy_static! {
     static ref PAGES_MAP: RwLock<HashMap<String, String>> = RwLock::new(HashMap::new());
 }
 
-/// Handle to the game window.
-///
-/// This static variable holds a mutex-protected optional `SafeHWND`,
-/// which represents the handle to the game window.
+/// Handle to the game window (Windows-only).
+#[cfg(windows)]
 static WINDOW_HANDLE: Lazy<Mutex<Option<SafeHWND>>> = Lazy::new(|| Mutex::new(None));
 
 /// Flag indicating whether the game is currently running.
@@ -84,14 +94,18 @@ static GAME_STATUS_SENDER: Lazy<watch::Sender<bool>> = Lazy::new(|| {
     tx
 });
 
-// Struct definitions
+// Windows-only struct definitions
+#[cfg(windows)]
 #[derive(Clone, Copy)]
 struct SafeHWND(HWND);
 
 // Implementations
+#[cfg(windows)]
 unsafe impl Send for SafeHWND {}
+#[cfg(windows)]
 unsafe impl Sync for SafeHWND {}
 
+#[cfg(windows)]
 impl SafeHWND {
     /// Creates a new `SafeHWND` instance.
     ///
@@ -176,20 +190,8 @@ pub fn setup_logging() -> (TeraLogger, other_mpsc::Receiver<String>) {
     (TeraLogger { sender }, receiver)
 }
 
-/// Runs the game with the provided credentials and language.
-///
-/// This function sets the credentials, checks if the game is already running,
-/// and launches the game asynchronously.
-///
-/// # Arguments
-///
-/// * `account_name` - The account name as a &str.
-/// * `ticket` - The session ticket as a &str.
-/// * `game_lang` - The game language as a &str.
-///
-/// # Returns
-///
-/// A Result containing the exit status of the game process or an error.
+/// Windows implementation: uses Win32 IPC to communicate with Tera.exe.
+#[cfg(windows)]
 pub async fn run_game(
     account_name: &str,
     characters_count: &str,
@@ -240,14 +242,232 @@ pub async fn run_game(
     launch_game().await
 }
 
-/// Launches the game and handles the game process lifecycle.
-///
-/// This function spawns the game process, manages the game window, and handles
-/// server list requests asynchronously.
-///
-/// # Returns
-///
-/// A Result containing the exit status of the game process or an error.
+/// Linux implementation: delegates Win32 IPC to launcher-bridge.exe running under Wine.
+/// The native launcher communicates with the bridge via stdin/stdout pipes.
+#[cfg(not(windows))]
+pub async fn run_game(
+    account_name: &str,
+    characters_count: &str,
+    ticket: &str,
+    game_lang: &str,
+    game_path: &str,
+    acts_map: HashMap<String, String>,
+    pages_map: HashMap<String, String>,
+) -> Result<ExitStatus, Box<dyn std::error::Error>> {
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        process::Command,
+    };
+
+    if is_game_running() {
+        return Err("Game is already running".into());
+    }
+
+    GAME_RUNNING.store(true, Ordering::SeqCst);
+    let _ = GAME_STATUS_SENDER.send(true);
+
+    // Find launcher-bridge.exe next to the native launcher binary
+    let exe_path = std::env::current_exe()?;
+    let exe_dir = exe_path.parent().ok_or("No parent directory for launcher executable")?;
+    let bridge_path = exe_dir.join("launcher-bridge.exe");
+
+    if !bridge_path.exists() {
+        GAME_RUNNING.store(false, Ordering::SeqCst);
+        let _ = GAME_STATUS_SENDER.send(false);
+        return Err(format!(
+            "launcher-bridge.exe not found at {:?}. Place it next to the launcher binary.",
+            bridge_path
+        ).into());
+    }
+
+    // Convert Linux absolute path to Wine Z: path (Wine maps / to Z:\)
+    let wine_game_path = if game_path.starts_with('/') {
+        format!("Z:{}", game_path.replace('/', "\\"))
+    } else {
+        game_path.to_string()
+    };
+
+    // Get server list URL from embedded config
+    let server_list_url = config::get_config_value("SERVER_LIST_URL");
+
+    // Serialize credentials for the bridge
+    let credentials = serde_json::json!({
+        "account_name": account_name,
+        "characters_count": characters_count,
+        "ticket": ticket,
+        "game_lang": game_lang,
+        "game_path": wine_game_path,
+        "server_list_url": server_list_url,
+        "acts_map": acts_map,
+        "pages_map": pages_map,
+    });
+
+    // Use WINE env var, or prefer wine64 (launcher-bridge.exe is a 64-bit PE),
+    // falling back to plain "wine" if wine64 is not on PATH.
+    let wine_bin = std::env::var("WINE").unwrap_or_else(|_| {
+        if std::process::Command::new("wine64")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            "wine64".to_string()
+        } else {
+            "wine".to_string()
+        }
+    });
+    info!("Spawning launcher-bridge.exe via '{}'", wine_bin);
+    info!("Wine game path: {}", wine_game_path);
+
+    // Resolve WINEPREFIX: must be an absolute path.
+    // If the env var is absent or not absolute, fall back to ~/tera-wine.
+    let wine_prefix = std::env::var("WINEPREFIX")
+        .ok()
+        .filter(|p| std::path::Path::new(p).is_absolute())
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+            format!("{}/tera-wine", home)
+        });
+
+    // launcher-bridge.exe is a 64-bit Windows binary; force wine to use a
+    // win64 prefix.  Allow the caller to override via WINEARCH if needed.
+    let wine_arch = std::env::var("WINEARCH").unwrap_or_else(|_| "win64".to_string());
+
+    info!("Using WINEPREFIX: {}", wine_prefix);
+    info!("Using WINEARCH: {}", wine_arch);
+
+    // Ensure the Wine prefix is properly initialised AND is a win64 prefix.
+    // A win64 prefix contains drive_c/windows/syswow64/; a win32 prefix does
+    // not.  Running wine64 against a win32 prefix causes STATUS_DLL_NOT_FOUND
+    // (c0000135) for kernel32.dll.  If we detect a win32 prefix we remove it
+    // and recreate it as win64 — it contains no user data at this stage.
+    let prefix_path = std::path::Path::new(&wine_prefix);
+    let syswow64   = prefix_path.join("drive_c/windows/syswow64");
+    let kernel32   = prefix_path.join("drive_c/windows/system32/kernel32.dll");
+
+    let needs_init = if kernel32.exists() && !syswow64.exists() {
+        // Prefix exists but is win32 — wipe it and start fresh as win64
+        warn!(
+            "Wine prefix at {:?} is a win32 prefix but wine64 needs win64 — removing and recreating …",
+            prefix_path
+        );
+        if let Err(e) = std::fs::remove_dir_all(prefix_path) {
+            return Err(format!(
+                "Failed to remove stale win32 Wine prefix at {:?}: {}. \
+                 Please delete it manually and re-launch.",
+                prefix_path, e
+            ).into());
+        }
+        true
+    } else {
+        !kernel32.exists()
+    };
+
+    if needs_init {
+        info!("Initialising Wine prefix as win64 at {:?} …", prefix_path);
+        let display = std::env::var("DISPLAY").unwrap_or_default();
+
+        let boot_status = std::process::Command::new(&wine_bin)
+            .args(["wineboot", "--init"])
+            .env("WINEPREFIX", &wine_prefix)
+            .env("WINEARCH", &wine_arch)
+            .env("DISPLAY", &display)
+            .status();
+        match boot_status {
+            Ok(s) if s.success() => info!("wineboot --init completed successfully"),
+            Ok(s) => warn!("wineboot --init exited with status {}", s),
+            Err(e) => warn!("wineboot --init failed to spawn: {}", e),
+        }
+
+        // Wait for wineserver to settle before installing components
+        let _ = std::process::Command::new("wineserver")
+            .args(["-w"])
+            .env("WINEPREFIX", &wine_prefix)
+            .status();
+
+        // Install runtime components required by Tera.exe.
+        // winetricks is optional — skip gracefully if not installed.
+        let has_winetricks = std::process::Command::new("winetricks")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if has_winetricks {
+            for component in &["vcrun2013", "vcrun2019", "d3dx9"] {
+                info!("Installing Wine component via winetricks: {} …", component);
+                let st = std::process::Command::new("winetricks")
+                    .args(["-q", component])
+                    .env("WINEPREFIX", &wine_prefix)
+                    .env("WINEARCH", &wine_arch)
+                    .env("DISPLAY", &display)
+                    .status();
+                match st {
+                    Ok(s) if s.success() => info!("winetricks {} installed", component),
+                    Ok(s) => warn!("winetricks {} exited with status {} (may already be present)", component, s),
+                    Err(e) => warn!("winetricks {} failed to spawn: {}", component, e),
+                }
+            }
+        } else {
+            warn!(
+                "winetricks not found — skipping vcrun2013/vcrun2019/d3dx9 install. \
+                 Tera.exe may fail to start. Run `install-linux-deps.sh` to install it."
+            );
+        }
+    }
+
+    let mut child = Command::new(&wine_bin)
+        .arg(&bridge_path)
+        .env("WINEPREFIX", &wine_prefix)
+        .env("WINEARCH", &wine_arch)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn wine launcher-bridge.exe: {}", e))?;
+
+    // Write JSON credentials to bridge stdin asynchronously, then close it
+    {
+        let mut stdin = child.stdin.take().ok_or("Failed to get bridge stdin")?;
+        let json_bytes = serde_json::to_vec(&credentials)?;
+        stdin.write_all(&json_bytes).await?;
+        // stdin closes when dropped
+    }
+
+    // Read JSON event lines from bridge stdout asynchronously
+    if let Some(stdout) = child.stdout.take() {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line_str)) = lines.next_line().await {
+            if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line_str) {
+                if let Some(event_type) = event["event"].as_str() {
+                    match event_type {
+                        "open_website" => {
+                            if let Some(url) = event["url"].as_str() {
+                                info!("Opening website: {}", url);
+                                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+                            }
+                        }
+                        _ => info!("Bridge event: {}", line_str),
+                    }
+                }
+            }
+        }
+    }
+
+    let status = child.wait().await?;
+    info!("Game bridge exited with status: {:?}", status);
+
+    GAME_RUNNING.store(false, Ordering::SeqCst);
+    let _ = GAME_STATUS_SENDER.send(false);
+
+    Ok(status)
+}
+
+/// Windows-only: Launches the game and handles the game process lifecycle.
+#[cfg(windows)]
 async fn launch_game() -> Result<ExitStatus, Box<dyn std::error::Error>> {
     if GAME_RUNNING.load(Ordering::SeqCst) {
         return Err("Game is already running".into());
@@ -331,6 +551,7 @@ async fn launch_game() -> Result<ExitStatus, Box<dyn std::error::Error>> {
 /// # Returns
 ///
 /// A vector of u16 values representing the wide string, including a null terminator.
+#[cfg(windows)]
 fn to_wstring(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(Some(0)).collect()
 }
@@ -368,14 +589,17 @@ pub fn reset_global_state() {
     if let Err(e) = GAME_STATUS_SENDER.send(false) {
         error!("Failed to send game status: {:?}", e);
     }
-    if let Ok(mut handle) = WINDOW_HANDLE.lock() {
-        *handle = None;
-    }
-    if let Ok(mut map) = ACTS_MAP.write() {
-        map.clear();
-    }
-    if let Ok(mut map) = PAGES_MAP.write() {
-        map.clear();
+    #[cfg(windows)]
+    {
+        if let Ok(mut handle) = WINDOW_HANDLE.lock() {
+            *handle = None;
+        }
+        if let Ok(mut map) = ACTS_MAP.write() {
+            map.clear();
+        }
+        if let Ok(mut map) = PAGES_MAP.write() {
+            map.clear();
+        }
     }
     info!("Global state reset completed");
 }
@@ -400,6 +624,7 @@ pub fn reset_global_state() {
 /// # Returns
 ///
 /// The result of the message processing.
+#[cfg(windows)]
 unsafe extern "system" fn wnd_proc(
     h_wnd: HWND,
     msg: UINT,
@@ -463,6 +688,7 @@ unsafe extern "system" fn wnd_proc(
 /// # Arguments
 ///
 /// * `tcs` - An `Arc<Notify>` used to signal when the window has been created.
+#[cfg(windows)]
 unsafe fn create_and_run_game_window(tcs: Arc<Notify>) {
     let launcher_class_name = "LAUNCHER_CLASS";
     let launcher_window_title = "LAUNCHER_WINDOW";
@@ -573,6 +799,7 @@ unsafe fn create_and_run_game_window(tcs: Arc<Notify>) {
 /// # Returns
 ///
 /// Returns TRUE to continue enumeration, FALSE to stop.
+#[cfg(windows)]
 unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let mut class_name: [u16; 256] = [0; 256];
     let len = GetClassNameW(hwnd, class_name.as_mut_ptr(), 256) as usize;
@@ -602,6 +829,7 @@ unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
 /// * `sender` - The sender's window handle as a HWND.
 /// * `game_event` - The event identifier as a usize.
 /// * `payload` - The data payload to be sent as a slice of bytes.
+#[cfg(windows)]
 unsafe fn send_response_message(
     recipient: WPARAM,
     sender: HWND,
@@ -639,6 +867,7 @@ unsafe fn send_response_message(
 ///
 /// * `recipient` - The HWND of the recipient window as a WPARAM.
 /// * `sender` - The sender's window handle as a HWND.
+#[cfg(windows)]
 unsafe fn handle_account_name_request(recipient: WPARAM, sender: HWND) {
     let account_name = GLOBAL_CREDENTIALS.get_account_name();
     if cfg!(debug_assertions) {
@@ -666,6 +895,7 @@ unsafe fn handle_account_name_request(recipient: WPARAM, sender: HWND) {
 ///
 /// * `recipient` - The HWND of the recipient window as a WPARAM.
 /// * `sender` - The sender's window handle as a HWND.
+#[cfg(windows)]
 unsafe fn handle_session_ticket_request(recipient: WPARAM, sender: HWND) {
     let session_ticket = GLOBAL_CREDENTIALS.get_ticket();
     if cfg!(debug_assertions) {
@@ -689,6 +919,7 @@ unsafe fn handle_session_ticket_request(recipient: WPARAM, sender: HWND) {
 ///
 /// * `recipient` - The HWND of the recipient window as a WPARAM.
 /// * `sender` - The sender's window handle as a usize.
+#[cfg(windows)]
 unsafe fn handle_server_list_request(recipient: WPARAM, sender: usize) {
     let runtime = Runtime::new().expect("Failed to create Tokio runtime");
     let server_list_data =
@@ -711,6 +942,7 @@ unsafe fn handle_server_list_request(recipient: WPARAM, sender: usize) {
 /// * `recipient` - The HWND of the recipient window as a WPARAM.
 /// * `sender` - The HWND of the sender window.
 /// * `payload` - The payload containing world information, if any.
+#[cfg(windows)]
 unsafe fn handle_enter_lobby_or_world(recipient: WPARAM, sender: HWND, payload: &[u8]) {
     if payload.is_empty() {
         on_lobby_entered();
@@ -736,6 +968,7 @@ unsafe fn handle_enter_lobby_or_world(recipient: WPARAM, sender: HWND, payload: 
 /// * `_recipient` - The HWND of the recipient window as a WPARAM (unused).
 /// * `_sender` - The HWND of the sender window (unused).
 /// * `payload` - The payload containing the `LauncherOpenWebsiteCommand` data.
+#[cfg(windows)]
 unsafe fn handle_open_website_command(_recipient: WPARAM, _sender: HWND, payload: &[u8]) {
     let event_name = "LAUNCHER_GAME_OPEN_WEBSITE_COMMAND";
     
@@ -790,6 +1023,7 @@ unsafe fn handle_open_website_command(_recipient: WPARAM, _sender: HWND, payload
 /// Opens a website in the system's default browser.
 ///
 /// Uses platform-specific commands to ensure compatibility across Windows, macOS, and Linux.
+#[cfg(windows)]
 fn open_website(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
@@ -855,6 +1089,7 @@ fn open_website(url: &str) -> std::io::Result<()> {
 /// * `_recipient` - The HWND of the recipient window as a WPARAM (unused).
 /// * `_sender` - The HWND of the sender window (unused).
 /// * `_payload` - The payload associated with the game start event (unused).
+#[cfg(windows)]
 unsafe fn handle_game_start(_recipient: WPARAM, _sender: HWND, _payload: &[u8]) {
     let event_name = "LAUNCHER_GAME_EVENT_GAME_STARTED";
     info!("Game started");
@@ -876,6 +1111,7 @@ unsafe fn handle_game_start(_recipient: WPARAM, _sender: HWND, _payload: &[u8]) 
 /// * `_sender` - The HWND of the sender window (unused).
 /// * `event_id` - The identifier of the game event.
 /// * `_payload` - The payload associated with the game event (unused).
+#[cfg(windows)]
 unsafe fn handle_game_event(_recipient: WPARAM, _sender: HWND, event_id: usize, _payload: &[u8]) {
     let event_name = match event_id {
         1001 => "LAUNCHER_GAME_EVENT_ENTERED_INTO_CINEMATIC",
@@ -913,6 +1149,7 @@ unsafe fn handle_game_event(_recipient: WPARAM, _sender: HWND, event_id: usize, 
 /// * `_recipient` - The HWND of the recipient window as a WPARAM (unused).
 /// * `_sender` - The HWND of the sender window (unused).
 /// * `_payload` - The payload associated with the game exit event (unused).
+#[cfg(windows)]
 unsafe fn handle_game_exit(_recipient: WPARAM, _sender: HWND, _payload: &[u8]) {
     let event_name = "LAUNCHER_GAME_EVENT_GAME_EXIT";
     info!("Game ended");
@@ -932,6 +1169,7 @@ unsafe fn handle_game_exit(_recipient: WPARAM, _sender: HWND, _payload: &[u8]) {
 /// * `_recipient` - The HWND of the recipient window as a WPARAM (unused).
 /// * `_sender` - The HWND of the sender window (unused).
 /// * `_payload` - The payload associated with the game crash event (unused).
+#[cfg(windows)]
 unsafe fn handle_game_crash(_recipient: WPARAM, _sender: HWND, _payload: &[u8]) {
     let event_name = "LAUNCHER_GAME_EVENT_GAME_CRASH";
     error!("Game crash detected");
@@ -939,6 +1177,7 @@ unsafe fn handle_game_crash(_recipient: WPARAM, _sender: HWND, _payload: &[u8]) 
 }
 
 /// Logs the event of entering the lobby.
+#[cfg(windows)]
 fn on_lobby_entered() {
     info!("Entered the lobby");
 }
@@ -948,6 +1187,7 @@ fn on_lobby_entered() {
 /// # Arguments
 ///
 /// * `world_name` - The name of the world being entered.
+#[cfg(windows)]
 fn on_world_entered(world_name: &str) {
     info!("Entered the world: {}", world_name);
 }
@@ -960,6 +1200,7 @@ fn on_world_entered(world_name: &str) {
 /// # Returns
 ///
 /// A Result containing a Vec<u8> of the encoded server list on success, or an error on failure.
+#[cfg(windows)]
 async fn get_server_list() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let url = config::get_config_value("SERVER_LIST_URL");
     let client = reqwest::Client::new();
@@ -994,6 +1235,7 @@ async fn get_server_list() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 /// Result<ServerList, Box<dyn std::error::Error>>:
 /// - Ok(ServerList): Populated ServerList struct
 /// - Err: Parsing error description
+#[cfg(windows)]
 fn parse_server_list_json(json: &Value) -> Result<ServerList, Box<dyn std::error::Error>> {
     let mut server_list = ServerList {
         servers: vec![],
@@ -1145,6 +1387,7 @@ fn parse_server_list_json(json: &Value) -> Result<ServerList, Box<dyn std::error
 /// # Returns
 ///
 /// A vector of bytes representing the UTF-16 little-endian encoded string.
+#[cfg(windows)]
 fn utf16_to_bytes(s: &str) -> Vec<u8> {
     s.encode_utf16()
         .flat_map(|c| c.to_le_bytes().to_vec())
@@ -1160,6 +1403,7 @@ fn utf16_to_bytes(s: &str) -> Vec<u8> {
 /// # Returns
 ///
 /// A u32 representation of the IP address, or 0 if parsing fails.
+#[cfg(windows)]
 fn ipv4_to_u32(ip: &str) -> u32 {
     ip.parse::<std::net::Ipv4Addr>()
         .map(|addr| u32::from_be_bytes(addr.octets()))

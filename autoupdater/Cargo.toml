@@ -9,3 +9,6 @@ name = "autoupdater"
 path = "src/main.rs"
 
 [dependencies]
+
+[target.'cfg(not(any(windows, target_os = "linux")))'.dependencies]
+libc = "0.2"

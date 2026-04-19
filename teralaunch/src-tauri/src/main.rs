@@ -323,6 +323,16 @@ fn get_hash_file_url() -> String {
 }
 
 fn find_config_file() -> Option<PathBuf> {
+  // Prefer config.ini next to the executable — stable regardless of cwd
+  if let Ok(exe_path) = env::current_exe() {
+    if let Some(exe_dir) = exe_path.parent() {
+      let config_in_exe_dir = exe_dir.join("config.ini");
+      if config_in_exe_dir.exists() {
+        return Some(config_in_exe_dir);
+      }
+    }
+  }
+
   let current_dir = env::current_dir().ok()?;
   let config_in_current = current_dir.join("config.ini");
   if config_in_current.exists() {
@@ -333,15 +343,6 @@ fn find_config_file() -> Option<PathBuf> {
   let config_in_parent = parent_dir.join("config.ini");
   if config_in_parent.exists() {
     return Some(config_in_parent);
-  }
-
-  if let Ok(exe_path) = env::current_exe() {
-    if let Some(exe_dir) = exe_path.parent() {
-      let config_in_exe_dir = exe_dir.join("config.ini");
-      if config_in_exe_dir.exists() {
-        return Some(config_in_exe_dir);
-      }
-    }
   }
 
   None
@@ -626,6 +627,30 @@ async fn select_game_folder() -> Result<String, String> {
 fn get_game_path() -> Result<PathBuf, String> {
   let (game_path, _) = load_config()?;
   Ok(game_path)
+}
+
+/// Find Tera.exe in `binaries_dir` case-insensitively.
+/// On Windows the filesystem is case-insensitive so a direct join works.
+/// On Linux we scan the directory for a case-insensitive match.
+fn find_game_exe(binaries_dir: &PathBuf) -> Option<PathBuf> {
+  // Try the canonical name first (fast path, works on Windows and case-correct Linux installs)
+  for name in &["Tera.exe", "TERA.exe", "tera.exe"] {
+    let candidate = binaries_dir.join(name);
+    if candidate.exists() {
+      return Some(candidate);
+    }
+  }
+  // Case-insensitive scan (Linux only fallback)
+  #[cfg(not(windows))]
+  if let Ok(entries) = std::fs::read_dir(binaries_dir) {
+    for entry in entries.flatten() {
+      let fname = entry.file_name();
+      if fname.to_string_lossy().to_lowercase() == "tera.exe" {
+        return Some(entry.path());
+      }
+    }
+  }
+  None
 }
 
 
@@ -1253,12 +1278,16 @@ async fn handle_launch_game(
     return Err(format!("Game path does not exist: {:?}", game_path));
   }
 
-  // Step 4: Validate game executable exists
-  let full_game_path = game_path.join("Binaries").join("Tera.exe");
-  if !full_game_path.exists() {
-    *is_launching = false;
-    return Err(format!("Game executable not found at: {:?}. Please verify your game installation.", full_game_path));
-  }
+  // Step 4: Validate game executable exists (case-insensitive on Linux)
+  let full_game_path = find_game_exe(&game_path.join("Binaries"))
+    .ok_or_else(|| {
+      *is_launching = false;
+      format!("Game executable not found in {:?}/Binaries. Please verify your game installation.", game_path)
+    });
+  let full_game_path = match full_game_path {
+    Ok(p) => p,
+    Err(e) => { *is_launching = false; return Err(e); }
+  };
 
   let full_game_path_str = match full_game_path.to_str() {
     Some(path_str) => path_str.to_string(),
@@ -1987,6 +2016,8 @@ struct LauncherUpdateInfo {
   new_version: String,
   installer_url: String,
   autoupdater_url: String,
+  /// Linux only: URL to replace launcher-bridge.exe alongside the launcher binary.
+  bridge_url: String,
 }
 
 /// Compare two dot-separated version strings (e.g. "1.0.1.52" vs "0.0.6").
@@ -2073,20 +2104,42 @@ async fn check_launcher_update(app: tauri::AppHandle) -> Result<LauncherUpdateIn
     .section(Some("LAUNCHER"))
     .ok_or("Missing [LAUNCHER] section in launcher_info.ini")?;
 
+  // Platform-specific version and installer keys.
+  // New format:
+  //   win_version / linux_version
+  //   win_installer_url / linux_installer_url
+  //   linux_bridge_url  (Linux only)
+  //   autoupdater_url   (shared)
+  //
+  // Falls back to the legacy `version` / `installer_url` keys so existing
+  // servers that haven't added the new keys keep working.
+  #[cfg(target_os = "windows")]
+  let (version_key, installer_key) = ("win_version", "win_installer_url");
+  #[cfg(not(target_os = "windows"))]
+  let (version_key, installer_key) = ("linux_version", "linux_installer_url");
+
   let server_version = section
-    .get("version")
-    .ok_or("Missing 'version' key in launcher_info.ini")?
+    .get(version_key)
+    .or_else(|| section.get("version"))
+    .ok_or(format!("Missing '{}' (or 'version') key in launcher_info.ini", version_key))?
     .to_string();
 
   let installer_url = section
-    .get("installer_url")
-    .ok_or("Missing 'installer_url' key in launcher_info.ini")?
+    .get(installer_key)
+    .or_else(|| section.get("installer_url"))
+    .ok_or(format!("Missing '{}' (or 'installer_url') key in launcher_info.ini", installer_key))?
     .to_string();
 
   let autoupdater_url = section
     .get("autoupdater_url")
     .unwrap_or("")
     .to_string();
+
+  // Linux bridge binary URL — empty string on Windows (unused)
+  #[cfg(not(target_os = "windows"))]
+  let bridge_url = section.get("linux_bridge_url").unwrap_or("").to_string();
+  #[cfg(target_os = "windows")]
+  let bridge_url = String::new();
 
   // Use the compiled package version as fallback when creating the local file
   let compiled_version = app.package_info().version.to_string();
@@ -2100,6 +2153,7 @@ async fn check_launcher_update(app: tauri::AppHandle) -> Result<LauncherUpdateIn
     new_version: server_version,
     installer_url,
     autoupdater_url,
+    bridge_url,
   })
 }
 
@@ -2180,6 +2234,8 @@ async fn apply_launcher_update(
   installer_url: String,
   autoupdater_url: String,
   new_version: String,
+  #[allow(unused_variables)]
+  bridge_url: String,
   app: tauri::AppHandle,
 ) -> Result<(), String> {
   let client = reqwest::Client::new();
@@ -2290,6 +2346,33 @@ async fn apply_launcher_update(
 
   // ── 4. Get current PID so autoupdater can wait for us to exit ─────────────
   let launcher_pid = std::process::id();
+
+  // ── 4b. On Linux: download the updated launcher-bridge.exe if a URL was given ──
+  #[cfg(not(target_os = "windows"))]
+  if !bridge_url.is_empty() {
+    info!("apply_launcher_update: downloading updated launcher-bridge.exe from {}", bridge_url);
+    let bridge_resp = client
+      .get(&bridge_url)
+      .send()
+      .await
+      .map_err(|e| format!("Failed to download launcher-bridge.exe: {}", e))?;
+
+    if !bridge_resp.status().is_success() {
+      return Err(format!("launcher-bridge.exe download failed with status: {}", bridge_resp.status()));
+    }
+
+    let bridge_bytes = bridge_resp
+      .bytes()
+      .await
+      .map_err(|e| format!("Failed to read launcher-bridge.exe bytes: {}", e))?;
+
+    let bridge_path = exe_dir.join("launcher-bridge.exe");
+    tokio::fs::write(&bridge_path, &bridge_bytes)
+      .await
+      .map_err(|e| format!("Failed to save launcher-bridge.exe: {}", e))?;
+
+    info!("apply_launcher_update: launcher-bridge.exe updated ({} bytes)", bridge_bytes.len());
+  }
 
   // ── 5. Spawn autoupdater (hidden window) then exit the launcher ───────────
   //  Args: <new_exe_path> <launcher_pid> <target_exe_path> <new_version>

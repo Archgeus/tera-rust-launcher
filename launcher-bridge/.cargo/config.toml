@@ -1,0 +1,5 @@
+# launcher-bridge must always be compiled as a Windows PE (x86_64).
+# This target is set here so that plain `cargo build --release` inside this
+# directory produces launcher-bridge.exe without needing an explicit --target flag.
+[build]
+target = "x86_64-pc-windows-gnu"

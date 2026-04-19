@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "autoupdater",
+    "teralib",
+    "teralaunch/src-tauri",
+    # launcher-bridge is a Win32-only binary that must be cross-compiled to
+    # x86_64-pc-windows-gnu.  It is intentionally excluded from the workspace
+    # so that `cargo build --release` on Linux does not attempt to compile it
+    # with the native toolchain.  Build it separately:
+    #
+    #   cd launcher-bridge
+    #   cargo build --release          # uses .cargo/config.toml target
+    #
+    # or from the workspace root:
+    #
+    #   cargo build --release --manifest-path launcher-bridge/Cargo.toml \
+    #       --target x86_64-pc-windows-gnu
+]
+resolver = "2"

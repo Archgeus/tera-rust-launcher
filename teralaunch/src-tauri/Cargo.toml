@@ -1,7 +1,7 @@
 [package]
-name = "teralaunch"
+name = "TeraLauncher"
 version = "0.0.0"
-description = "A Tauri App"
+description = "TERA Online Private Server Launcher"
 authors = ["TNC97"]
 edition = "2021"
 

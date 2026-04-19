@@ -44,7 +44,13 @@
       ],
       "copyright": "© 2026                                 TERA Private. All rights reserved.",
       "shortDescription": "TERA Online Private Server Launcher",
-      "longDescription": "Custom launcher for TERA Online private server."
+      "longDescription": "Custom launcher for TERA Online private server.",
+      "windows": {
+        "webviewInstallMode": {
+          "type": "embedBootstrapper",
+          "silent": false
+        }
+      }
     }
   }
 }
