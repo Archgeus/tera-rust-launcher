@@ -626,6 +626,20 @@ span#current-file {
   transform: none;
   filter: grayscale(1);
 }
+.btn-launch-game.error {
+  opacity: 1;
+  cursor: not-allowed;
+  transition: none;
+  transform: none;
+  filter: none;
+  background: linear-gradient(0deg, #c0392b 0%, #e74c3c 100%);
+  box-shadow: inset -17px 0px 37px 0px rgba(100, 0, 0, 0.60), inset 17px 0px 37px 0px rgba(100, 0, 0, 0.60), 0px 0px 35px 0px rgba(231, 76, 60, 0.45);
+  border-color: rgba(150, 20, 20, 0.80);
+}
+.btn-launch-game.error:hover {
+  filter: none;
+  transform: none;
+}
 .launch-game-parent {
   display: flex;
   flex-direction: column;

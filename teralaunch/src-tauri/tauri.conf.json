@@ -7,7 +7,7 @@
 
   "package": {
     "productName": "TeraLauncher",
-    "version": "1.0.5"
+    "version": "1.0.6"
   },
 
   "tauri": {
@@ -42,7 +42,7 @@
         "icons/tera_server.png",
         "icons/tera_server.ico"
       ],
-      "copyright": "© 2026                                 TERA Private. All rights reserved.",
+      "copyright": "© 2026 TERA Private. All rights reserved.",
       "shortDescription": "TERA Online Private Server Launcher",
       "longDescription": "Custom launcher for TERA Online private server.",
       "windows": {

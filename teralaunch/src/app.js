@@ -6,6 +6,49 @@ const { message } = window.__TAURI__.dialog;
 const REQUIRED_PRIVILEGE_LEVEL = 3;
 const UPDATE_CHECK_ENABLED = true;
 
+// Human-readable descriptions for TERA game exit codes.
+// Key structure: gameEndCodes[reason][code]
+const gameEndCodes = {
+  "0":     { "0": "Standard game exit" },
+  "5":     { "0": "Graphics driver error" },
+  "6":     { "0": "Data file read error" },
+  "7":     { "0": "Standard game closure" },
+  "8":     { "0": "Internet connection error" },
+  "9":     { "0": "Failed to retrieve authentication information" },
+  "10":    { "0": "Insufficient memory" },
+  "11":    { "0": "Failed to initialize the graphics card" },
+  "12":    { "0": "Graphics card does not support the game" },
+  "15":    { "0": "The game was automatically closed due to inactivity" },
+  "33":    { "0": "Administrator disconnected from the world" },
+  "34":    { "0": "Administrator disconnected from the game" },
+  "257":   { "0": "Failed to log in", "13": "This account has been banned", "32781": "Account has been banned" },
+  "258":   { "0": "Payment system error" },
+  "259":   { "0": "An attempt to log into the game from another device was made" },
+  "260":   { "0": "Unable to retrieve server list", "404": "Unable to retrieve server list: 404" },
+  "261":   { "0": "Failed to log in: 261." },
+  "262":   { "0": "The account is currently in use on another device" },
+  "265":   { "0": "Some client files are missing or corrupted" },
+  "273":   { "0": "Server list is currently unavailable" },
+  "274":   { "0": "Settings file loading error" },
+  "275":   { "0": "Graphics settings are too high", "2": "File TERA/Binaries/TERA.exe not found", "5": "Access to file TERA/Binaries/TERA.exe is denied", "193": "File TERA/Binaries/TERA.exe is not a Win32 application", "216": "Client is incompatible with Windows version", "740": "Insufficient rights to run TERA/Binaries/TERA.exe", "1392": "File TERA/Binaries/TERA.exe is corrupted or inaccessible" },
+  "276":   { "0": "Failed to update the launcher" },
+  "277":   { "0": "Patch file format error" },
+  "278":   { "0": "Program files are corrupted" },
+  "32768": { "0": "Server is undergoing maintenance" },
+  "32769": { "0": "First closed beta test of TERA has ended" },
+  "32770": { "0": "Server is temporarily unavailable due to maintenance" },
+  "65280": { "0": "An error occurred during the game, and the client was closed" },
+  "65535": { "0": "Game system failure" },
+};
+
+function resolveGameExitMessage(reason, code) {
+  const reasonStr = String(reason);
+  const codeStr   = String(code);
+  const reasonMap = gameEndCodes[reasonStr];
+  if (!reasonMap) return null;
+  return reasonMap[codeStr] ?? reasonMap["0"] ?? null;
+}
+
 const App = {
   translations: {},
   currentLanguage: "EUR",
@@ -30,6 +73,8 @@ const App = {
     lastLogTime: 0,
     speedHistory: [],
     speedHistoryMaxLength: 10,
+    emaSpeed: 0,           // exponential moving average of speed
+    smoothedEta: 0,        // smoothed ETA in seconds
     isUpdateAvailable: false,
     isDownloadComplete: false,
     lastProgressUpdate: null,
@@ -63,6 +108,7 @@ const App = {
     maintenanceDetails: null,
     shouldLaunchAfterUpdate: false,
     justCompletedUpdate: false,
+    patchNoCheck: false,
   },
 
   /**
@@ -133,6 +179,7 @@ const App = {
       // Also starts the 5-minute periodic check.
       this.checkLauncherUpdateOnStartup();
       this.loadLauncherVersion();
+      await this.loadPortalConfig();
 
       listen("maintenance_active", (event) => {
         console.log("Maintenance active event received:", event.payload);
@@ -143,7 +190,7 @@ const App = {
       //localStorage.setItem('isFirstLaunch','true');
 
       if (this.state.isAuthenticated && this.Router.currentRoute === "home") {
-        if (!UPDATE_CHECK_ENABLED) {
+        if (!UPDATE_CHECK_ENABLED || this.state.patchNoCheck) {
           console.log(
             "Updates are disabled, skipping update check and server connection"
           );
@@ -172,6 +219,17 @@ const App = {
       }
     } catch (error) {
       console.error("Error during app initialization:", error);
+    }
+  },
+
+  // Fetches portal config and stores patchNoCheck in state.
+  async loadPortalConfig() {
+    try {
+      const configStr = await invoke("get_portal_config");
+      const config = JSON.parse(configStr);
+      this.setState({ patchNoCheck: !!config.patchNoCheck });
+    } catch (err) {
+      console.warn("Could not fetch portal config:", err);
     }
   },
 
@@ -229,16 +287,19 @@ const App = {
     listen("game_status", async (event) => {
       console.log("Game status update:", event.payload);
       const isRunning = event.payload === "GAME_STATUS_RUNNING";
+      if (!isRunning) this.setState({ isGameLaunching: false });
       this.updateUIForGameStatus(isRunning);
     });
 
     listen("game_status_changed", (event) => {
       const isRunning = event.payload;
+      if (!isRunning) this.setState({ isGameLaunching: false });
       this.updateUIForGameStatus(isRunning);
     });
 
     listen("game_ended", async () => {
       console.log("Game has ended");
+      this.setState({ isGameLaunching: false });
       this.updateUIForGameStatus(false);
       this.toggleModal("log-modal", false);
 
@@ -247,6 +308,42 @@ const App = {
         await appWindow.setFocus();
       } catch (e) {
         console.error("Failed to unminimize or focus window:", e);
+      }
+    });
+
+    listen("game_exit_info", (event) => {
+      const { code, reason, crash, details, stderr, launch_error } = event.payload;
+      console.log("game_exit_info:", event.payload);
+
+      // run_game() itself failed before TERA.exe could even start (or IPC window failed)
+      if (launch_error) {
+        this.showErrorMessage(`Game launch failed: ${launch_error}`);
+        return;
+      }
+
+      if (crash) {
+        // Prefer human-readable stderr (CrashAddress=, ExceptionCode=, etc.) over
+        // the raw GUID/identifier that TERA sends in the WM_COPYDATA crash payload.
+        const crashInfo = (stderr && stderr.trim())
+          || (details && details.trim())
+          || "No crash details available.";
+        this.showErrorMessage(`Game crashed:\n${crashInfo}`);
+        return;
+      }
+
+      // reason 0, code 0 — check stderr and process exit code before silently ignoring
+      if (reason === 0 && code === 0) {
+        if (stderr && stderr.trim()) {
+          this.showErrorMessage(`Game exited unexpectedly:\n${stderr.trim()}`);
+        }
+        return;
+      }
+
+      const msg = resolveGameExitMessage(reason, code);
+      if (msg) {
+        this.showErrorMessage(msg);
+      } else {
+        this.showErrorMessage(`Game exited with code ${code}, reason ${reason}.`);
       }
     });
   },
@@ -920,7 +1017,7 @@ const App = {
    * @param {boolean} [isLogin=false] Whether the update check is triggered by a login action.
    */
   async initializeAndCheckUpdates(isLogin = false) {
-    if (!UPDATE_CHECK_ENABLED) {
+    if (!UPDATE_CHECK_ENABLED || this.state.patchNoCheck) {
       console.log("Updates are disabled");
       this.setState({
         isUpdateAvailable: false,
@@ -973,7 +1070,7 @@ const App = {
    * @param {boolean} [isLogin=false] Whether the update check is triggered by a login action.
    */
   async checkForUpdates() {
-    if (!UPDATE_CHECK_ENABLED) {
+    if (!UPDATE_CHECK_ENABLED || this.state.patchNoCheck) {
       console.log("Update checks are disabled");
       this.setState({
         isUpdateAvailable: false,
@@ -1034,6 +1131,10 @@ const App = {
           ),
         });
         setTimeout(async () => {
+          // Reset EMA state so stale speed/ETA from a previous session don't bleed in
+          this.state.emaSpeed = 0;
+          this.state.smoothedEta = 0;
+          this.state.speedHistory = [];
           this.setState({ currentUpdateMode: "download" });
           await this.runPatchSystem(filesToUpdate);
         }, 2000);
@@ -1060,6 +1161,11 @@ const App = {
    */
   async forceFileVerification() {
     console.log("🔧 forceFileVerification() called");
+
+    if (this.state.patchNoCheck) {
+      console.log("🔧 forceFileVerification: patchNoCheck is enabled, skipping");
+      return;
+    }
 
     if (this.state.isCheckingForUpdates || this.state.currentUpdateMode === "download") {
       console.log("🔧 forceFileVerification: operation already in progress, ignoring");
@@ -1544,6 +1650,12 @@ const App = {
       return;
     }
 
+    // Clear any stale error/launch state from a previous failed attempt so the
+    // backend is_launching lock doesn't stay stuck and the button looks normal.
+    this.setState({ gameExecutionFailed: false });
+    this.setLaunchButtonError(false);
+    try { await invoke("reset_launch_state"); } catch (_) {}
+
     // Step 1: Refresh account info
     try {
       const rawResponse = await invoke("get_fresh_account_info");
@@ -1560,7 +1672,7 @@ const App = {
     }
 
     // Step 2: ALWAYS check for updates before launching
-    if (UPDATE_CHECK_ENABLED) {
+    if (UPDATE_CHECK_ENABLED && !this.state.patchNoCheck) {
       this.setState({ isCheckingForUpdates: true, currentUpdateMode: "file_check" });
       this.updateLaunchGameButton(true);
       try {
@@ -1576,7 +1688,7 @@ const App = {
       } catch (error) {
         console.error("handleLaunchGame: update check failed:", error);
       } finally {
-        this.setState({ isCheckingForUpdates: false });
+        this.setState({ isCheckingForUpdates: false, currentUpdateMode: null });
         this.updateLaunchGameButton(false);
       }
     }
@@ -1627,21 +1739,17 @@ const App = {
       console.error("Error initiating game launch:", error);
       const game_launch_error = this.t("GAME_LAUNCH_ERROR") + error.toString();
 
-      // Specific handling for maintenance errors.
-      // Even though it was already checked earlier, this remains in case the server enters maintenance
-      // between the initial check and the final launch request.
+      // Always restore the window — the game didn’t launch so there’s nothing to hide behind.
+      try {
+        await appWindow.unminimize();
+        await appWindow.setFocus();
+      } catch (e) {
+        console.error("Failed to unminimize window after launch error:", e);
+      }
+
       if (error.toString().includes("MAINTENANCE_ACTIVE")) {
         console.log("Launch blocked by MAINTENANCE_ACTIVE error from backend.");
-        // Restore (unminimize) the window if it was minimized right before the backend threw the error.
-        try {
-          await appWindow.unminimize();
-          await appWindow.setFocus();
-        } catch (e) {
-          console.error(
-            "Failed to unminimize or focus window after maintenance error:",
-            e
-          );
-        }
+        // maintenance modal was already shown by the listener
       } else {
         // Real game launch error (e.g., missing file, internal game error)
         this.showErrorModal(this.t("ERROR"), game_launch_error);
@@ -1656,6 +1764,7 @@ const App = {
       await invoke("reset_launch_state");
       this.updateUIForGameStatus(false);
       this.setState({ gameExecutionFailed: true });
+      this.setLaunchButtonError(true);
     } finally {
       this.setState({ isGameLaunching: false });
     }
@@ -1716,8 +1825,33 @@ const App = {
       this.launchGameBtn = document.querySelector("#launch-game-btn");
     }
     if (this.launchGameBtn) {
+      // Clear any lingering error state when the button is being re-enabled
+      if (!disabled) this.setLaunchButtonError(false);
       this.launchGameBtn.disabled = disabled;
       this.launchGameBtn.classList.toggle("disabled", disabled);
+    }
+  },
+
+  /**
+   * Puts the launch button into a permanent error state (disabled, red, shows "ERROR").
+   * Pass false to restore normal label and appearance.
+   */
+  setLaunchButtonError(isError) {
+    if (!this.launchGameBtn) {
+      this.launchGameBtn = document.querySelector("#launch-game-btn");
+    }
+    const labelEl = this.launchGameBtn && this.launchGameBtn.querySelector(".launch-game");
+    if (!this.launchGameBtn || !labelEl) return;
+    if (isError) {
+      this.launchGameBtn.disabled = true;
+      this.launchGameBtn.classList.add("disabled", "error");
+      labelEl.removeAttribute("data-translate");
+      labelEl.textContent = this.t("ERROR") || "ERROR";
+    } else {
+      this.setState({ gameExecutionFailed: false });
+      this.launchGameBtn.classList.remove("error");
+      labelEl.setAttribute("data-translate", "LAUNCH_GAME");
+      labelEl.textContent = this.t("LAUNCH_GAME") || "LAUNCH GAME";
     }
   },
 
@@ -1854,11 +1988,6 @@ const App = {
    * @memberof App
    */
   calculateGlobalTimeRemaining(totalDownloadedBytes, totalSize, speed) {
-    console.log("Calculating global time remaining:", {
-      totalDownloadedBytes,
-      totalSize,
-      speed,
-    });
     if (
       !isFinite(speed) ||
       speed <= 0 ||
@@ -1866,36 +1995,31 @@ const App = {
       !isFinite(totalSize) ||
       totalDownloadedBytes >= totalSize
     ) {
-      console.log("Invalid input for global time remaining calculation");
-      return 0;
+      return this.state.smoothedEta || 0;
     }
-    let bytesRemaining = totalSize - totalDownloadedBytes;
 
-    let averageSpeed = this.calculateAverageSpeed(speed);
+    const bytesRemaining = totalSize - totalDownloadedBytes;
+    const avgSpeed = this.calculateAverageSpeed(speed);
+    const rawEta = bytesRemaining / avgSpeed;
 
-    let secondsRemaining = bytesRemaining / averageSpeed;
-    console.log("Calculated time remaining:", secondsRemaining);
-    return Math.min(secondsRemaining, 30 * 24 * 60 * 60); // Limit to 30 days maximum
+    // Smooth ETA: blend previous smoothed value with new raw value.
+    // Alpha 0.15 = heavy smoothing (slow to react but very stable).
+    const alpha = 0.15;
+    const prev = this.state.smoothedEta;
+    const smoothed = prev > 0 ? prev + alpha * (rawEta - prev) : rawEta;
+    this.state.smoothedEta = smoothed;
+
+    return Math.min(smoothed, 30 * 24 * 60 * 60);
   },
 
-  // Updated calculateAverageSpeed method
   calculateAverageSpeed(currentSpeed) {
-    // Add current speed to history
-    this.state.speedHistory.push(currentSpeed);
-
-    // Limit history size
-    if (this.state.speedHistory.length > this.state.speedHistoryMaxLength) {
-      this.state.speedHistory.shift(); // Remove oldest value
-    }
-
-    // Calculate average speed
-    const sum = this.state.speedHistory.reduce((acc, speed) => acc + speed, 0);
-    const averageSpeed = sum / this.state.speedHistory.length;
-
-    console.log("Speed history:", this.state.speedHistory);
-    console.log("Average speed:", averageSpeed);
-
-    return averageSpeed;
+    // Exponential moving average — recent speed weighted more, no hard window.
+    // Alpha 0.2: smooth but responsive to sustained speed changes.
+    const alpha = 0.2;
+    const prev = this.state.emaSpeed;
+    const ema = prev > 0 ? prev + alpha * (currentSpeed - prev) : currentSpeed;
+    this.state.emaSpeed = ema;
+    return ema;
   },
 
   /**
@@ -2345,6 +2469,7 @@ const App = {
       }
 
       this.captchaEnabled = config.captchaEnabled;
+      this.setState({ patchNoCheck: !!config.patchNoCheck });
     } catch (err) {
       console.warn("Could not fetch portal config, using defaults:", err);
     }

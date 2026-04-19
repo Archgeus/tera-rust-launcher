@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json};
 use tauri::{Manager};
 use tauri::api::dialog::FileDialogBuilder;
-use teralib::{get_game_status_receiver, run_game, reset_global_state};
+use teralib::{get_game_status_receiver, run_game, reset_global_state, get_last_exit_info, get_last_crash_details, get_last_game_stderr};
 use teralib::config::get_config_value;
 use reqwest::Client;
 use lazy_static::lazy_static;
@@ -140,6 +140,8 @@ struct PortalConfigResponse {
     registration_disabled: bool,
     #[serde(rename = "captchaEnabled", default)]
     captcha_enabled: bool,
+    #[serde(rename = "patchNoCheck", default)]
+    patch_no_check: bool,
 }
 
 // This struct combines all info into the format the frontend expects (same as old LoginResponse)
@@ -1338,6 +1340,7 @@ async fn handle_launch_game(
     }
 
     info!("Launching game with executable: {}", full_game_path_str);
+    let launch_error: Option<String>;
     match
       run_game(
         &account_name,
@@ -1353,11 +1356,32 @@ async fn handle_launch_game(
         let result = format!("Game exited with status: {:?}", exit_status);
         app_handle_clone.emit_all("game_status", &result).unwrap();
         info!("{}", result);
+        launch_error = None;
       }
       Err(e) => {
         let error = format!("Error launching game: {:?}", e);
         app_handle_clone.emit_all("game_status", &error).unwrap();
         error!("{}", error);
+        launch_error = Some(e.to_string());
+      }
+    }
+
+    // Emit structured exit info (code + reason) so the frontend can show a message.
+    {
+      let exit_info = get_last_exit_info();
+      let crash_details = get_last_crash_details();
+      let stderr = get_last_game_stderr();
+      let payload = serde_json::json!({
+        "code":   exit_info.code,
+        "reason": exit_info.reason,
+        "crash":  !crash_details.is_empty(),
+        "details": crash_details,
+        "stderr": stderr,
+        // non-null when run_game() itself errored (not a TERA exit code)
+        "launch_error": launch_error,
+      });
+      if let Err(e) = app_handle_clone.emit_all("game_exit_info", payload) {
+        error!("Failed to emit game_exit_info event: {:?}", e);
       }
     }
 
@@ -2541,13 +2565,13 @@ async fn get_portal_config() -> Result<String, String> {
   let res = match client.get(&url).send().await {
     Ok(r) => r,
     Err(_) => {
-      let default = PortalConfigResponse { registration_disabled: false, captcha_enabled: true };
+      let default = PortalConfigResponse { registration_disabled: false, captcha_enabled: true, patch_no_check: false };
       return serde_json::to_string(&default).map_err(|e| e.to_string());
     }
   };
 
   if !res.status().is_success() {
-    let default = PortalConfigResponse { registration_disabled: false, captcha_enabled: true };
+    let default = PortalConfigResponse { registration_disabled: false, captcha_enabled: true, patch_no_check: false };
     return serde_json::to_string(&default).map_err(|e| e.to_string());
   }
 

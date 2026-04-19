@@ -1,4 +1,5 @@
 
+/.agents
 /teralib/target
 /teralaunch/node_modules
 /teralaunch/target
@@ -7,3 +8,4 @@
 /target
 teralib/src/config/config.json
 teralaunch/config.ini
+skills-lock.json

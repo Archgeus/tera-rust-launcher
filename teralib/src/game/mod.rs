@@ -51,6 +51,66 @@ use winapi::{
 #[cfg(windows)]
 const WM_GAME_EXITED: u32 = WM_USER + 1;
 
+/// Exit information recorded from the last LauncherGameExitNotification (event 1020).
+#[derive(Debug, Clone, Default)]
+pub struct GameExitInfo {
+    pub code:   u32,
+    pub reason: u32,
+}
+
+/// Details string from the last LauncherGameCrashNotification (event 1021).
+/// Stored as a plain UTF-8 string after decoding the UTF-16 payload.
+#[cfg(windows)]
+static LAST_EXIT_INFO: Lazy<Mutex<GameExitInfo>> =
+    Lazy::new(|| Mutex::new(GameExitInfo::default()));
+
+#[cfg(windows)]
+static LAST_CRASH_DETAILS: Lazy<Mutex<String>> =
+    Lazy::new(|| Mutex::new(String::new()));
+
+/// Stderr captured from the TERA.exe process during the last game session.
+#[cfg(windows)]
+static LAST_GAME_STDERR: Lazy<Mutex<String>> =
+    Lazy::new(|| Mutex::new(String::new()));
+
+/// Returns a copy of the exit info recorded from the last game session.
+/// Code and reason are both 0 if the game has not exited yet or exited normally.
+pub fn get_last_exit_info() -> GameExitInfo {
+    #[cfg(windows)]
+    {
+        LAST_EXIT_INFO.lock().unwrap().clone()
+    }
+    #[cfg(not(windows))]
+    {
+        GameExitInfo::default()
+    }
+}
+
+/// Returns crash details from the last game session (empty if no crash).
+pub fn get_last_crash_details() -> String {
+    #[cfg(windows)]
+    {
+        LAST_CRASH_DETAILS.lock().unwrap().clone()
+    }
+    #[cfg(not(windows))]
+    {
+        String::new()
+    }
+}
+
+/// Returns the stderr output captured from TERA.exe during the last game session.
+/// Empty if nothing was written to stderr.
+pub fn get_last_game_stderr() -> String {
+    #[cfg(windows)]
+    {
+        LAST_GAME_STDERR.lock().unwrap().clone()
+    }
+    #[cfg(not(windows))]
+    {
+        String::new()
+    }
+}
+
 /// Module for handling server list functionality.
 ///
 /// This module includes the generated code from the `_serverlist_proto.rs` file,
@@ -505,18 +565,55 @@ async fn launch_game() -> Result<ExitStatus, Box<dyn std::error::Error>> {
 
     tcs.notified().await;
 
+    // If window creation failed, WINDOW_HANDLE will still be None.
+    // Abort cleanly rather than spawning TERA.exe without an IPC window.
+    {
+        let handle_guard = WINDOW_HANDLE.lock().unwrap();
+        if handle_guard.is_none() {
+            GAME_RUNNING.store(false, Ordering::SeqCst);
+            let _ = GAME_STATUS_SENDER.send(false);
+            return Err("Failed to create launcher IPC window — TERA.exe was not started. \
+                        Check logs for the Win32 error code.".into());
+        }
+    }
+
+    // Clear previous stderr before each launch
+    if let Ok(mut s) = LAST_GAME_STDERR.lock() { s.clear(); }
+
     let mut child = Command::new(GLOBAL_CREDENTIALS.get_game_path())
         .arg(format!(
             "-LANGUAGEEXT={}",
             GLOBAL_CREDENTIALS.get_game_lang()
         ))
+        .stderr(std::process::Stdio::piped())
         .spawn()?;
 
     let pid = child.id();
     info!("Game process spawned with PID: {}", pid);
 
+    // Read TERA.exe stderr in a background thread so it doesn't block child.wait().
+    // TERA writes human-readable crash info (CrashAddress=, ExceptionCode=, etc.) to stderr.
+    let stderr_thread = child.stderr.take().map(|stderr| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut output = String::new();
+            let _ = std::io::BufReader::new(stderr).read_to_string(&mut output);
+            output
+        })
+    });
+
     let status = child.wait()?;
     info!("Game process exited with status: {:?}", status);
+
+    let stderr_output = stderr_thread
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    if !stderr_output.is_empty() {
+        info!("Captured {} bytes from TERA.exe stderr", stderr_output.len());
+        if let Ok(mut s) = LAST_GAME_STDERR.lock() {
+            *s = stderr_output;
+        }
+    }
 
     GAME_RUNNING.store(false, Ordering::SeqCst);
     GAME_STATUS_SENDER.send(false).unwrap();
@@ -694,6 +791,12 @@ unsafe fn create_and_run_game_window(tcs: Arc<Notify>) {
     let launcher_window_title = "LAUNCHER_WINDOW";
     let class_name = to_wstring(launcher_class_name);
     let window_name = to_wstring(launcher_window_title);
+
+    // Unregister any stale class left over from a previous (force-closed) session
+    // before attempting to register a fresh one.  Ignore the return value — if the
+    // class doesn't exist yet the call is a harmless no-op.
+    UnregisterClassW(class_name.as_ptr(), GetModuleHandleW(null_mut()));
+
     let wnd_class = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
         style: 0,
@@ -711,7 +814,9 @@ unsafe fn create_and_run_game_window(tcs: Arc<Notify>) {
 
     let atom = RegisterClassExW(&wnd_class);
     if atom == 0 {
-        error!("Failed to register window class");
+        let err = GetLastError();
+        error!("Failed to register window class (error {})", err);
+        tcs.notify_one(); // unblock launch_game so it can return an error
         return;
     }
 
@@ -731,8 +836,10 @@ unsafe fn create_and_run_game_window(tcs: Arc<Notify>) {
     );
 
     if hwnd.is_null() {
-        error!("Failed to create window");
+        let err = GetLastError();
+        error!("Failed to create window (error {})", err);
         UnregisterClassW(class_name.as_ptr(), GetModuleHandleW(null_mut()));
+        tcs.notify_one(); // unblock launch_game so it can return an error
         return;
     }
 
@@ -1150,10 +1257,26 @@ unsafe fn handle_game_event(_recipient: WPARAM, _sender: HWND, event_id: usize, 
 /// * `_sender` - The HWND of the sender window (unused).
 /// * `_payload` - The payload associated with the game exit event (unused).
 #[cfg(windows)]
-unsafe fn handle_game_exit(_recipient: WPARAM, _sender: HWND, _payload: &[u8]) {
+unsafe fn handle_game_exit(_recipient: WPARAM, _sender: HWND, payload: &[u8]) {
     let event_name = "LAUNCHER_GAME_EVENT_GAME_EXIT";
-    info!("Game ended");
     info!("Game event 1020 ({}) received", event_name);
+
+    // LauncherGameExitNotification: { length: u32, code: u32, reason: u32 }
+    // length must be 12; payload here is the COPYDATASTRUCT data (12 bytes).
+    if payload.len() >= 12 {
+        let length = u32::from_le_bytes(payload[0..4].try_into().unwrap_or([0;4]));
+        let code   = u32::from_le_bytes(payload[4..8].try_into().unwrap_or([0;4]));
+        let reason = u32::from_le_bytes(payload[8..12].try_into().unwrap_or([0;4]));
+        info!("Game exited — length={}, code={}, reason={} (0x{:x})", length, code, reason, reason);
+        if let Ok(mut info) = LAST_EXIT_INFO.lock() {
+            *info = GameExitInfo { code, reason };
+        }
+    } else {
+        info!("Game ended (no exit payload)");
+        if let Ok(mut info) = LAST_EXIT_INFO.lock() {
+            *info = GameExitInfo::default();
+        }
+    }
 }
 
 /// Handles the game crash event.
@@ -1170,10 +1293,25 @@ unsafe fn handle_game_exit(_recipient: WPARAM, _sender: HWND, _payload: &[u8]) {
 /// * `_sender` - The HWND of the sender window (unused).
 /// * `_payload` - The payload associated with the game crash event (unused).
 #[cfg(windows)]
-unsafe fn handle_game_crash(_recipient: WPARAM, _sender: HWND, _payload: &[u8]) {
+unsafe fn handle_game_crash(_recipient: WPARAM, _sender: HWND, payload: &[u8]) {
     let event_name = "LAUNCHER_GAME_EVENT_GAME_CRASH";
     error!("Game crash detected");
     info!("Game event 1021 ({}) received", event_name);
+
+    // LauncherGameCrashNotification: { details: u16string } (not NUL-terminated)
+    let details = if payload.len() >= 2 && payload.len() % 2 == 0 {
+        let u16_units: Vec<u16> = payload
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        String::from_utf16_lossy(&u16_units).to_string()
+    } else {
+        String::from_utf8_lossy(payload).to_string()
+    };
+    error!("Crash details: {}", details);
+    if let Ok(mut d) = LAST_CRASH_DETAILS.lock() {
+        *d = details;
+    }
 }
 
 /// Logs the event of entering the lobby.
