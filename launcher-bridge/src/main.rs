@@ -14,7 +14,7 @@
 #![windows_subsystem = "console"]
 
 use lazy_static::lazy_static;
-use log::{error, info};
+use log::{error, info, warn};
 use once_cell::sync::Lazy;
 use prost::Message;
 use reqwest;
@@ -75,6 +75,7 @@ lazy_static! {
     static ref GAME_PATH: RwLock<String> = RwLock::new(String::new());
     static ref SERVER_LIST_URL: RwLock<String> = RwLock::new(String::new());
     static ref PAGES_MAP: RwLock<HashMap<String, String>> = RwLock::new(HashMap::new());
+    static ref ACTS_MAP: RwLock<HashMap<String, String>> = RwLock::new(HashMap::new());
     static ref SERVER_LIST_SENDER: Mutex<Option<mpsc::Sender<(WPARAM, usize)>>> =
         Mutex::new(None);
 }
@@ -188,6 +189,76 @@ unsafe fn handle_open_website_command(_recipient: WPARAM, _sender: HWND, payload
     }
 }
 
+unsafe fn handle_web_url_request(recipient: WPARAM, sender: HWND, payload: &[u8]) {
+    if payload.len() < 4 {
+        error!("Event 26: invalid payload size: {} bytes", payload.len());
+        return;
+    }
+    let id = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+    let id_str = id.to_string();
+
+    let url = {
+        let map = ACTS_MAP.read().unwrap();
+        map.get(&id_str).cloned().unwrap_or_default()
+    };
+    let url = if url.contains("%s") {
+        let ticket = TICKET.read().unwrap().clone();
+        url.replace("%s", &ticket)
+    } else {
+        url
+    };
+    let response_url = if url.is_empty() { "|" } else { &url };
+
+    info!("WebURLRequest id={} -> {}", id, response_url);
+
+    let mut response: Vec<u8> = Vec::new();
+    response.extend_from_slice(&id.to_le_bytes());
+    for word in response_url.encode_utf16().chain(std::iter::once(0u16)) {
+        response.extend_from_slice(&word.to_le_bytes());
+    }
+    send_response_message(recipient, sender, 27, &response);
+}
+
+unsafe fn handle_open_support_website_command(_recipient: WPARAM, _sender: HWND, _payload: &[u8]) {
+    info!("Event 1025: open support website");
+    emit(&serde_json::json!({ "event": "open_support_website" }));
+}
+
+unsafe fn handle_game_event_notification(_recipient: WPARAM, _sender: HWND, payload: &[u8]) {
+    // Decode NUL-terminated UTF-16 LE payload
+    let msg: String = {
+        let words: Vec<u16> = payload
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .take_while(|&c| c != 0)
+            .collect();
+        String::from_utf16_lossy(&words).to_string()
+    };
+    info!("Event 0 (GameEventNotification): {:?}", msg);
+
+    if msg == "csPopup()" {
+        emit(&serde_json::json!({ "event": "open_support_website" }));
+    } else if let Some(inner) = msg.strip_prefix("gameEvent(").and_then(|s| s.strip_suffix(')')) {
+        if let Ok(code) = inner.parse::<u32>() {
+            emit(&serde_json::json!({ "event": "game_event", "code": code }));
+        } else {
+            warn!("gameEvent: failed to parse event code from {:?}", msg);
+        }
+    } else if let Some(inner) = msg.strip_prefix("endPopup(").and_then(|s| s.strip_suffix(')')) {
+        if let Ok(reason) = inner.parse::<u32>() {
+            info!("endPopup: client exited with reason {}", reason);
+            emit(&serde_json::json!({ "event": "end_popup", "reason": reason }));
+        } else {
+            warn!("endPopup: failed to parse reason from {:?}", msg);
+        }
+    } else if msg.starts_with("promoPopup(") {
+        info!("promoPopup (purpose unknown): {:?}", msg);
+    } else {
+        warn!("Event 0: unrecognised message: {:?}", msg);
+    }
+    // No response sent per protocol spec.
+}
+
 // ─── Window procedure ─────────────────────────────────────────────────────────
 unsafe extern "system" fn wnd_proc(
     h_wnd: HWND,
@@ -206,6 +277,7 @@ unsafe extern "system" fn wnd_proc(
             };
             info!("WM_COPYDATA event_id={}", event_id);
             match event_id {
+                0 => handle_game_event_notification(w_param, h_wnd, payload),
                 1 => handle_account_name_request(w_param, h_wnd),
                 3 => handle_session_ticket_request(w_param, h_wnd),
                 5 => {
@@ -218,10 +290,22 @@ unsafe extern "system" fn wnd_proc(
                 }
                 7 => handle_enter_lobby_or_world(w_param, h_wnd, payload),
                 25 => handle_open_website_command(w_param, h_wnd, payload),
+                26 => handle_web_url_request(w_param, h_wnd, payload),
                 1000 => info!("Game started (event 1000)"),
                 1001..=1016 => info!("Game event {}", event_id),
                 1020 => info!("Game exit (event 1020)"),
                 1021 => info!("Game crash (event 1021)"),
+                1022 => info!("Anti-cheat starting (event 1022)"),
+                1023 => info!("Anti-cheat started (event 1023)"),
+                1024 => {
+                    let code = if payload.len() >= 8 {
+                        u64::from_le_bytes(payload[0..8].try_into().unwrap_or([0; 8]))
+                    } else {
+                        0
+                    };
+                    error!("Anti-cheat error (event 1024): 0x{:X}", code);
+                }
+                1025 => handle_open_support_website_command(w_param, h_wnd, payload),
                 _ => {}
             }
             1
@@ -471,6 +555,7 @@ fn main() {
     *GAME_PATH.write().unwrap() = creds.game_path.clone();
     *SERVER_LIST_URL.write().unwrap() = creds.server_list_url;
     *PAGES_MAP.write().unwrap() = creds.pages_map;
+    *ACTS_MAP.write().unwrap() = creds.acts_map;
 
     // Set up server list channel
     let (tx, mut rx) = mpsc::channel::<(WPARAM, usize)>(32);

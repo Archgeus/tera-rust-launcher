@@ -2,9 +2,7 @@
 use crate::config;
 #[cfg(windows)]
 use lazy_static::lazy_static;
-use log::{error, info, Level, Metadata, Record};
-#[cfg(not(windows))]
-use log::warn;
+use log::{error, info, warn, Level, Metadata, Record};
 use once_cell::sync::Lazy;
 use std::{
     collections::HashMap,
@@ -744,19 +742,21 @@ unsafe extern "system" fn wnd_proc(
             info!("Payload (hex): {}", hex_payload.join(" "));
 
             match event_id {
+                0 => handle_game_event_notification(w_param, h_wnd, payload),
                 1 => handle_account_name_request(w_param, h_wnd),
                 3 => handle_session_ticket_request(w_param, h_wnd),
                 5 => handle_server_list_request(w_param, h_wnd as usize),
                 7 => handle_enter_lobby_or_world(w_param, h_wnd, payload),
                 25 => handle_open_website_command(w_param, h_wnd, payload),
-                ///////  TODO
-                //26 => handle_web_url_request(w_param, h_wnd, payload), //LauncherWebURLRequest uint32_t id; u16string arguments;
-                //27 => handle_web_url_response(w_param, h_wnd, payload), //LauncherWebURLResponse uint32_t id; u16string url;
-                ///////
+                26 => handle_web_url_request(w_param, h_wnd, payload),
                 1000 => handle_game_start(w_param, h_wnd, payload),
                 1001..=1016 => handle_game_event(w_param, h_wnd, event_id, payload),
                 1020 => handle_game_exit(w_param, h_wnd, payload),
                 1021 => handle_game_crash(w_param, h_wnd, payload),
+                1022 => handle_anti_cheat_starting(w_param, h_wnd, payload),
+                1023 => handle_anti_cheat_started(w_param, h_wnd, payload),
+                1024 => handle_anti_cheat_error(w_param, h_wnd, payload),
+                1025 => handle_open_support_website_command(w_param, h_wnd, payload),
                 _ => {
                     info!("Unhandled event ID: {}", event_id);
                 }
@@ -1158,30 +1158,79 @@ fn open_website(url: &str) -> std::io::Result<()> {
 
 // TODO handle_web_url_request & handle_web_url_response
 
-/// Handles the game Web URL Request command (0x1A).
+/// Handles the game Web URL Request command (0x1A / event 26).
 ///
-/// This function processes the request sent by the game to obtain
-/// the corresponding URL based on the UIWindow ID.
+/// Payload: `LauncherWebURLRequest { id: u32, arguments: u16string }`
+/// where `u16string` is a NUL-terminated UTF-16 string.
+///
+/// Looks up the UIWindow ID in ACTS_MAP and sends a `LauncherWebURLResponse`
+/// (event 27) back: `{ id: u32, url: u16string }`.  If no URL is found or
+/// the URL is empty, sends `|` per the protocol spec.
 ///
 /// # Safety
 ///
-/// This function is unsafe because it works with raw pointers and unverified payload data.
-// unsafe fn handle_web_url_request(_recipient: WPARAM, _sender: HWND, payload: &[u8]) {
-//     let event_name = "LauncherWebURLRequest";
-//     info!("Game event 26 ({}) received", event_name);
-// }
+/// Unsafe due to raw pointer usage in `send_response_message`.
+#[cfg(windows)]
+unsafe fn handle_web_url_request(recipient: WPARAM, sender: HWND, payload: &[u8]) {
+    let event_name = "LauncherWebURLRequest";
+    info!("Game event 26 ({}) received", event_name);
 
-/// Handles the game Web URL Response command (0x1B).
-///
-/// This function sends the resolved URL back to the game.
-///
-/// # Safety
-///
-/// Unsafe due to raw pointer usage.
-// unsafe fn handle_web_url_response(_recipient: WPARAM, _sender: HWND, id: u32, url: &str) {
-//     let event_name = "LauncherWebURLResponse";
-//     info!("Game event 27 ({}) received - ID: {}, URL: {}", event_name, id, url);
-// }
+    // Need at least 4 bytes for the id field.
+    if payload.len() < 4 {
+        error!(
+            "Game event 26 ({}) received with invalid payload size: {} bytes (expected >= 4)",
+            event_name,
+            payload.len()
+        );
+        return;
+    }
+
+    // Parse id (u32 little-endian)
+    let id = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+
+    // Parse NUL-terminated UTF-16 arguments (may be empty)
+    let arguments: String = if payload.len() > 4 {
+        let u16_slice: Vec<u16> = payload[4..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .take_while(|&c| c != 0)
+            .collect();
+        String::from_utf16_lossy(&u16_slice).to_string()
+    } else {
+        String::new()
+    };
+
+    info!("WebURLRequest — id: {}, arguments: {:?}", id, arguments);
+
+    // Look up the URL from ACTS_MAP using the id as the key.
+    let id_str = id.to_string();
+    let url: String = {
+        let map_guard = ACTS_MAP.read().unwrap();
+        map_guard.get(&id_str).cloned().unwrap_or_default()
+    };
+
+    // Substitute %s with the session ticket if needed.
+    let url = if url.contains("%s") {
+        url.replace("%s", &GLOBAL_CREDENTIALS.get_ticket())
+    } else {
+        url
+    };
+
+    // Per spec: send | to indicate no URL should be opened when empty.
+    let response_url = if url.is_empty() { "|" } else { &url };
+
+    info!("WebURLRequest — id: {} -> responding with URL: {:?}", id, response_url);
+
+    // Build response payload: id (u32 LE) + NUL-terminated UTF-16 url
+    let mut response: Vec<u8> = Vec::new();
+    response.extend_from_slice(&id.to_le_bytes());
+    for word in response_url.encode_utf16().chain(std::iter::once(0u16)) {
+        response.extend_from_slice(&word.to_le_bytes());
+    }
+
+    send_response_message(recipient, sender, 27, &response);
+    info!("Game event 27 (LauncherWebURLResponse) sent for id: {}", id);
+}
 
 /// Handles the game start event.
 ///
@@ -1311,6 +1360,124 @@ unsafe fn handle_game_crash(_recipient: WPARAM, _sender: HWND, payload: &[u8]) {
     error!("Crash details: {}", details);
     if let Ok(mut d) = LAST_CRASH_DETAILS.lock() {
         *d = details;
+    }
+}
+
+/// Handles the anti-cheat module starting notification (0x3FE / event 1022).
+///
+/// `LauncherAntiCheatStartingNotification` has an empty payload.
+///
+/// # Safety
+///
+/// Unsafe due to raw pointer usage in the Windows API context.
+#[cfg(windows)]
+unsafe fn handle_anti_cheat_starting(_recipient: WPARAM, _sender: HWND, _payload: &[u8]) {
+    info!("Game event 1022 (LauncherAntiCheatStartingNotification) received — anti-cheat module is starting");
+}
+
+/// Handles the anti-cheat module started notification (0x3FF / event 1023).
+///
+/// `LauncherAntiCheatStartedNotification` has an empty payload.
+///
+/// # Safety
+///
+/// Unsafe due to raw pointer usage in the Windows API context.
+#[cfg(windows)]
+unsafe fn handle_anti_cheat_started(_recipient: WPARAM, _sender: HWND, _payload: &[u8]) {
+    info!("Game event 1023 (LauncherAntiCheatStartedNotification) received — anti-cheat module started successfully");
+}
+
+/// Handles the anti-cheat module error notification (0x400 / event 1024).
+///
+/// `LauncherAntiCheatErrorNotification` payload: `{ error: u64 }`.
+/// `error` contains the error code returned by the anti-cheat module.
+///
+/// # Safety
+///
+/// Unsafe due to raw pointer usage in the Windows API context.
+#[cfg(windows)]
+unsafe fn handle_anti_cheat_error(_recipient: WPARAM, _sender: HWND, payload: &[u8]) {
+    let error_code: u64 = if payload.len() >= 8 {
+        u64::from_le_bytes(payload[0..8].try_into().unwrap_or([0; 8]))
+    } else {
+        0
+    };
+    error!(
+        "Game event 1024 (LauncherAntiCheatErrorNotification) received — anti-cheat failed to start (error: 0x{:X})",
+        error_code
+    );
+}
+
+/// Handles the Game Event Notification (0x0 / event 0).
+///
+/// TERA.exe sends a UTF-16 LE string payload matching one of:
+///   `csPopup()`        — open customer support website
+///   `gameEvent(N)`     — notable in-game action (N = event code)
+///   `endPopup(N)`      — client exited with reason code N
+///   `promoPopup(N)`    — promotional event (purpose unknown)
+///
+/// launcher.exe must not respond to this message.
+///
+/// # Safety
+///
+/// Unsafe due to raw pointer usage in the Windows API context.
+#[cfg(windows)]
+unsafe fn handle_game_event_notification(_recipient: WPARAM, _sender: HWND, payload: &[u8]) {
+    // Decode NUL-terminated UTF-16 LE payload
+    let msg: String = {
+        let words: Vec<u16> = payload
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .take_while(|&c| c != 0)
+            .collect();
+        String::from_utf16_lossy(&words).to_string()
+    };
+    info!("Game event 0 (GameEventNotification) received: {:?}", msg);
+
+    if msg == "csPopup()" {
+        let url = config::get_config_value("SUPPORT_URL");
+        if url.is_empty() {
+            warn!("csPopup(): SUPPORT_URL is not configured — cannot open support website");
+        } else if let Err(err) = open_website(&url) {
+            error!("csPopup(): Failed to open support website '{}': {}", url, err);
+        }
+    } else if let Some(inner) = msg.strip_prefix("gameEvent(").and_then(|s| s.strip_suffix(')')) {
+        if let Ok(code) = inner.parse::<u32>() {
+            info!("csPopup: gameEvent({})", code);
+        } else {
+            warn!("gameEvent: failed to parse event code from {:?}", msg);
+        }
+    } else if let Some(inner) = msg.strip_prefix("endPopup(").and_then(|s| s.strip_suffix(')')) {
+        if let Ok(reason) = inner.parse::<u32>() {
+            info!("endPopup: client exited with reason code {} (0x{:X})", reason, reason);
+        } else {
+            warn!("endPopup: failed to parse reason code from {:?}", msg);
+        }
+    } else if msg.starts_with("promoPopup(") {
+        info!("promoPopup: {:?} (purpose unknown)", msg);
+    } else {
+        warn!("Game event 0: unrecognised message: {:?}", msg);
+    }
+}
+
+/// Handles the open support website command (0x401 / event 1025).
+///
+/// `LauncherOpenSupportWebsiteCommand` has an empty payload.
+/// Opens the customer support URL (config key `SUPPORT_URL`) in the default browser.
+///
+/// # Safety
+///
+/// Unsafe due to raw pointer usage in the Windows API context.
+#[cfg(windows)]
+unsafe fn handle_open_support_website_command(_recipient: WPARAM, _sender: HWND, _payload: &[u8]) {
+    info!("Game event 1025 (LauncherOpenSupportWebsiteCommand) received");
+    let url = config::get_config_value("SUPPORT_URL");
+    if url.is_empty() {
+        warn!("SUPPORT_URL is not configured — cannot open support website");
+        return;
+    }
+    if let Err(err) = open_website(&url) {
+        error!("Failed to open support website '{}': {}", url, err);
     }
 }
 
