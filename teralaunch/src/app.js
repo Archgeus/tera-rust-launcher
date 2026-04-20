@@ -109,6 +109,7 @@ const App = {
     shouldLaunchAfterUpdate: false,
     justCompletedUpdate: false,
     patchNoCheck: false,
+    currentFileProgress: 0,
   },
 
   /**
@@ -542,6 +543,12 @@ const App = {
     // Calculate global progress from bytes, not from individual file progress
     const globalProgress = Math.min(100, (downloaded_bytes / total_bytes) * 100);
 
+    // Reset per-file bar to 0 when a new file starts
+    const newFileStarted = current_file_index !== this.state.currentFileIndex;
+    if (newFileStarted) {
+      this.setState({ currentFileProgress: 0 });
+    }
+
     // Calculate global remaining time using downloaded_bytes
     const timeRemaining = this.calculateGlobalTimeRemaining(
       downloaded_bytes,
@@ -552,6 +559,7 @@ const App = {
     this.setState({
       currentFileName: file_name,
       currentProgress: globalProgress,
+      currentFileProgress: Math.min(100, progress),
       currentSpeed: speed,
       downloadedSize: downloaded_bytes,
       totalSize: total_bytes,
@@ -664,6 +672,7 @@ const App = {
       totalSize: document.getElementById("total-size"),
       progressPercentage: document.getElementById("progress-percentage"),
       progressPercentageDiv: document.getElementById("progress-percentage-div"),
+      fileProgressDiv: document.getElementById("file-progress-div"),
       downloadSpeed: document.getElementById("download-speed"),
       timeRemaining: document.getElementById("time-remaining"),
       dlStatusString: document.getElementById("dl-status-string"),
@@ -760,6 +769,12 @@ const App = {
         elements.progressPercentageDiv.style.width = `${progress}%`;
         elements.currentFile.style.display = "flex !important";
       }
+    }
+    if (elements.fileProgressDiv) {
+      const isDownloading = this.state.currentUpdateMode === "download";
+      const fileProgress = isDownloading ? Math.min(100, this.state.currentFileProgress || 0) : 0;
+      elements.fileProgressDiv.style.width = `${fileProgress}%`;
+      elements.fileProgressDiv.parentElement.style.display = isDownloading ? "flex" : "none";
     }
   },
 
@@ -963,6 +978,7 @@ const App = {
       hashFileProgress: 0,
       currentProcessingFile: "",
       processedFiles: 0,
+      currentFileProgress: 0,
     });
   },
 

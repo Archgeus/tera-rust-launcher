@@ -541,6 +541,17 @@ span#current-file {
   justify-content: flex-start;
   padding: 0 2px;
 }
+.outer-progress-file {
+  margin-top: 2px;
+}
+.inner-progress-file {
+  height: 5px;
+  background-color: #f7b700;
+  box-shadow: 0 0 8px rgb(255 204 60 / 44%);
+  border-radius: 0 1px 1px 0;
+  position: relative;
+  transition: width 0.15s linear;
+}
 .game-progress,
 .progress-container {
   display: flex;
@@ -552,6 +563,12 @@ span#current-file {
   align-self: stretch;
   justify-content: flex-start;
   gap: 14px;
+}
+.progress-bars-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  gap: 0;
 }
 .game-progress {
   flex: 1;
