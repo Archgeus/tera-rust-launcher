@@ -2038,7 +2038,7 @@ struct LauncherUpdateInfo {
   update_available: bool,
   current_version: String,
   new_version: String,
-  installer_url: String,
+  bin_url: String,
   autoupdater_url: String,
   /// Linux only: URL to replace launcher-bridge.exe alongside the launcher binary.
   bridge_url: String,
@@ -2128,19 +2128,19 @@ async fn check_launcher_update(app: tauri::AppHandle) -> Result<LauncherUpdateIn
     .section(Some("LAUNCHER"))
     .ok_or("Missing [LAUNCHER] section in launcher_info.ini")?;
 
-  // Platform-specific version and installer keys.
+  // Platform-specific version and binary keys.
   // New format:
   //   win_version / linux_version
-  //   win_installer_url / linux_installer_url
+  //   win_bin_url / linux_bin_url
   //   linux_bridge_url  (Linux only)
   //   autoupdater_url   (shared)
   //
-  // Falls back to the legacy `version` / `installer_url` keys so existing
+  // Falls back to the legacy `version` / `bin_url` keys so existing
   // servers that haven't added the new keys keep working.
   #[cfg(target_os = "windows")]
-  let (version_key, installer_key) = ("win_version", "win_installer_url");
+  let (version_key, bin_key) = ("win_version", "win_bin_url");
   #[cfg(not(target_os = "windows"))]
-  let (version_key, installer_key) = ("linux_version", "linux_installer_url");
+  let (version_key, bin_key) = ("linux_version", "linux_bin_url");
 
   let server_version = section
     .get(version_key)
@@ -2148,10 +2148,10 @@ async fn check_launcher_update(app: tauri::AppHandle) -> Result<LauncherUpdateIn
     .ok_or(format!("Missing '{}' (or 'version') key in launcher_info.ini", version_key))?
     .to_string();
 
-  let installer_url = section
-    .get(installer_key)
-    .or_else(|| section.get("installer_url"))
-    .ok_or(format!("Missing '{}' (or 'installer_url') key in launcher_info.ini", installer_key))?
+  let bin_url = section
+    .get(bin_key)
+    .or_else(|| section.get("bin_url"))
+    .ok_or(format!("Missing '{}' (or 'bin_url') key in launcher_info.ini", bin_key))?
     .to_string();
 
   let autoupdater_url = section
@@ -2175,7 +2175,7 @@ async fn check_launcher_update(app: tauri::AppHandle) -> Result<LauncherUpdateIn
     update_available,
     current_version: local_version,
     new_version: server_version,
-    installer_url,
+    bin_url,
     autoupdater_url,
     bridge_url,
   })
@@ -2255,7 +2255,7 @@ async fn ensure_autoupdater() -> Result<(), String> {
 /// `{ progress: f64 (0-100), downloaded: u64, total: u64 }`
 #[tauri::command]
 async fn apply_launcher_update(
-  installer_url: String,
+  bin_url: String,
   autoupdater_url: String,
   new_version: String,
   #[allow(unused_variables)]
@@ -2276,7 +2276,7 @@ async fn apply_launcher_update(
 
   info!("apply_launcher_update: autoupdater path = {}", autoupdater.display());
   info!("apply_launcher_update: autoupdater_url  = '{}'", autoupdater_url);
-  info!("apply_launcher_update: installer_url    = '{}'", installer_url);
+  info!("apply_launcher_update: bin_url          = '{}'", bin_url);
   info!("apply_launcher_update: new_version      = '{}'", new_version);
 
   if !autoupdater.exists() {
@@ -2315,7 +2315,7 @@ async fn apply_launcher_update(
 
   // ── 3. Download the new launcher exe to %TEMP%\launcher_update\ ──────────
   let response = client
-    .get(&installer_url)
+    .get(&bin_url)
     .send()
     .await
     .map_err(|e| format!("Failed to start launcher download: {}", e))?;
@@ -2330,7 +2330,7 @@ async fn apply_launcher_update(
   fs::create_dir_all(&temp_dir)
     .map_err(|e| format!("Failed to create temp directory: {}", e))?;
 
-  let filename = installer_url
+  let filename = bin_url
     .split('/')
     .last()
     .filter(|s| !s.is_empty())
