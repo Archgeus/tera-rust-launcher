@@ -277,19 +277,43 @@ Compiled version from `tauri.conf.json → package.version` is always source of 
 
 You previously applied manual patches to the TERA Api. Those changes are now superseded by the plugin below. **Revert them first:**
 
-1. In `src/middleware/` (around line 513), revert:
+1. In `src/controllers/portalLauncher.controller.js` (around line 513), revert:
+
 ```js
-// revert TO this (original):
+if (!captcha || req.session.captchaVerified) {
+			next();
+		} else {
+			next(new ApiError("Captcha error", 15));
+		}
+```
+
+TO this (original):
+
+```js
 if (req.session.captchaVerified) {
-    next();
-} else {
-    next(new ApiError("Captcha error", 15));
-}
+			next();
+		} else {
+			next(new ApiError("Captcha error", 15));
+		}
 ```
 
 2. In `src/controllers/portalLauncher.controller.js`, remove the `GetPortalConfig` export added around line 1041.
 
-3. In the router file (around line 164), remove:
+```js
+module.exports.GetPortalConfig = () => [
+	/**
+	 * @type {RequestHandler}
+	 */
+	(req, res) => {
+		res.json({
+			registrationDisabled: isRegistrationDisabled,
+			captchaEnabled: captcha !== null
+		});
+	}
+];
+```
+
+4. In the router file `src/routes/portal/launcher.routes.js` (around line 164), remove:
 ```js
 .get("/GetPortalConfig", portalLauncherController.GetPortalConfig(mod))
 ```
