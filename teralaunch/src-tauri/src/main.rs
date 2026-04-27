@@ -238,6 +238,111 @@ lazy_static! {
   static ref HASH_CACHE: Mutex<HashMap<String, CachedFileInfo>> = Mutex::new(HashMap::new());
 }
 
+// ─── Error Logging Module ────────────────────────────────────────────────────
+/// Gets the path to launcher_error.log in the same directory as the executable.
+fn get_launcher_error_log_path() -> Result<PathBuf, String> {
+  let exe_path = env::current_exe()
+    .map_err(|e| format!("Failed to get exe path for error log: {}", e))?;
+  let exe_dir = exe_path.parent()
+    .ok_or("Failed to get exe directory for error log")?;
+  Ok(exe_dir.join("launcher_error.log"))
+}
+
+/// Formats a reqwest::Error into a detailed error description
+fn format_reqwest_error(url: &str, error: &reqwest::Error) -> String {
+  let error_type = if error.is_timeout() {
+    "TIMEOUT"
+  } else if error.is_connect() {
+    "CONNECTION_ERROR"
+  } else if error.is_redirect() {
+    "REDIRECT_ERROR"
+  } else if error.is_request() {
+    "REQUEST_ERROR"
+  } else if error.is_body() {
+    "BODY_ERROR"
+  } else if error.is_decode() {
+    "DECODE_ERROR"
+  } else if error.is_status() {
+    "HTTP_STATUS_ERROR"
+  } else {
+    "UNKNOWN_ERROR"
+  };
+  
+  format!(
+    "URL: {} | Type: {} | Details: {}",
+    url, error_type, error
+  )
+}
+
+/// Get current timestamp as a formatted string
+fn get_timestamp() -> String {
+  use std::time::{SystemTime, UNIX_EPOCH};
+  
+  // Get the current time
+  let now = SystemTime::now();
+  let duration = now.duration_since(UNIX_EPOCH).unwrap_or_default();
+  
+  // Basic timestamp: "YYYY-MM-DD HH:MM:SS"
+  // This is a simple implementation without external crates
+  let secs = duration.as_secs();
+  let nanos = duration.subsec_nanos();
+  
+  // For now, we'll just use a simpler format
+  // In a production system, you'd use chrono or time crate
+  format!("{} (seconds: {})", secs, nanos / 1_000_000)
+}
+
+/// Logs an error to launcher_error.log with timestamp and details.
+/// Rotates the log file if it exceeds 5MB.
+fn log_error_to_file(error_msg: &str) -> Result<(), String> {
+  let log_path = get_launcher_error_log_path()?;
+  
+  // Get current timestamp
+  let timestamp = get_timestamp();
+  
+  // Format the log entry
+  let log_entry = format!("[{}] {}\n", timestamp, error_msg);
+  
+  // Check if log file needs rotation (> 5MB = 5242880 bytes)
+  let max_size = 5_242_880u64;
+  let needs_rotation = if let Ok(metadata) = std::fs::metadata(&log_path) {
+    metadata.len() > max_size
+  } else {
+    false
+  };
+  
+  if needs_rotation {
+    // Rotate the log file by adding a timestamp suffix
+    let rotation_suffix = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map(|d| d.as_secs())
+      .unwrap_or(0);
+    let rotated_path = log_path.with_file_name(
+      format!("launcher_error_{}.log", rotation_suffix)
+    );
+    
+    // Try to rename the current log to a backup
+    let _ = std::fs::rename(&log_path, &rotated_path);
+    
+    info!("Rotated launcher_error.log to: {}", rotated_path.display());
+  }
+  
+  // Append the new log entry
+  let mut file = std::fs::OpenOptions::new()
+    .create(true)
+    .append(true)
+    .open(&log_path)
+    .map_err(|e| format!("Failed to open launcher_error.log: {}", e))?;
+  
+  file.write_all(log_entry.as_bytes())
+    .map_err(|e| format!("Failed to write to launcher_error.log: {}", e))?;
+  
+  file.sync_all()
+    .map_err(|e| format!("Failed to sync launcher_error.log: {}", e))?;
+  
+  Ok(())
+}
+
 
 /* fn get_config_value(key: &str) -> String {
   CONFIG_JSON[key].as_str().expect(&format!("{} must be set in config.json", key)).to_string()
@@ -262,12 +367,32 @@ fn is_ignored(path: &Path, game_path: &Path, ignored_paths: &HashSet<&str>) -> b
 }
 
 async fn get_server_hash_file() -> Result<serde_json::Value, String> {
+  let url = get_hash_file_url();
   let client = reqwest::Client::new();
   let res = client
-    .get(get_hash_file_url())
+    .get(&url)
     .send().await
-    .map_err(|e| e.to_string())?;
-  let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    .map_err(|e| {
+      let detailed_error = format_reqwest_error(&url, &e);
+      let error_msg = format!("Failed to fetch hash file: {}", detailed_error);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
+  
+  if !res.status().is_success() {
+    let error_msg = format!(
+      "Hash file request failed with HTTP status: {} (URL: {})",
+      res.status(), url
+    );
+    let _ = log_error_to_file(&error_msg);
+    return Err(error_msg);
+  }
+  
+  let json: serde_json::Value = res.json().await.map_err(|e| {
+    let error_msg = format!("Failed to parse hash file JSON: {} (URL: {})", e, url);
+    let _ = log_error_to_file(&error_msg);
+    error_msg
+  })?;
   Ok(json)
 }
 
@@ -435,16 +560,30 @@ async fn get_maintenance_status() -> Result<MaintenanceResponse, String> {
   let res = client
     .get(&maintenance_url)
     .send().await
-    .map_err(|e| format!("Failed to connect to maintenance server: {}", e))?;
+    .map_err(|e| {
+      let detailed_error = format_reqwest_error(&maintenance_url, &e);
+      let error_msg = format!("Failed to connect to maintenance server: {}", detailed_error);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   if !res.status().is_success() {
-    return Err(format!("Maintenance check request failed with status: {}", res.status()));
+    let error_msg = format!(
+      "Maintenance check request failed with HTTP status: {} (URL: {})",
+      res.status(), maintenance_url
+    );
+    let _ = log_error_to_file(&error_msg);
+    return Err(error_msg);
   }
 
   let maintenance_body: MaintenanceResponse = res
     .json()
     .await
-    .map_err(|e| format!("Failed to parse maintenance response: {}", e))?;
+    .map_err(|e| {
+      let error_msg = format!("Failed to parse maintenance response: {} (URL: {})", e, maintenance_url);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   if !maintenance_body.return_value {
     return Err(format!("Maintenance check API error: {}", maintenance_body.msg));
@@ -1516,8 +1655,13 @@ async fn login(username: String, password: String) -> Result<String, String> {
     let client = Client::builder()
         .cookie_store(true)
         .cookie_provider(Arc::clone(&cookie_jar))
+        .timeout(Duration::from_secs(30))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+          let error_msg = format!("Failed to build HTTP client: {}", e);
+          let _ = log_error_to_file(&error_msg);
+          error_msg
+        })?;
 
     // --- Step 1: Define Base URL ---
     // The base launcher URL is obtained once from the global constant.
@@ -1531,17 +1675,28 @@ async fn login(username: String, password: String) -> Result<String, String> {
         .form(&[("login", username.as_str()), ("password", password.as_str())])
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+          let detailed_error = format_reqwest_error(&login_url, &e);
+          let error_msg = format!("Login connection failed: {}", detailed_error);
+          let _ = log_error_to_file(&error_msg);
+          error_msg
+        })?;
 
     // --- Parse the login response and extract session cookie ---
     if !login_res.status().is_success() {
-        return Err(format!("Login request failed with status: {}", login_res.status()));
+        let error_msg = format!("Login request failed with HTTP status: {} (URL: {})", login_res.status(), login_url);
+        let _ = log_error_to_file(&error_msg);
+        return Err(error_msg);
     }
 
     let login_body: InitialLoginResponse = login_res
         .json()
         .await
-        .map_err(|e| format!("Failed to parse login response: {}.", e))?;
+        .map_err(|e| {
+          let error_msg = format!("Failed to parse login response: {} (URL: {})", e, login_url);
+          let _ = log_error_to_file(&error_msg);
+          error_msg
+        })?;
 
     if !login_body.return_value {
         return Err(login_body.msg);
@@ -1549,7 +1704,11 @@ async fn login(username: String, password: String) -> Result<String, String> {
 
     // Parse the cookies to retrieve the session identifier (launcher.sid)
     let login_url_parsed = Url::parse(&login_url)
-        .map_err(|e| format!("Failed to parse login URL: {}", e))?;
+        .map_err(|e| {
+          let error_msg = format!("Failed to parse login URL: {} (URL: {})", e, login_url);
+          let _ = log_error_to_file(&error_msg);
+          error_msg
+        })?;
     let cookie_header_value = cookie_jar.cookies(&login_url_parsed);
 
     let session_cookie: Option<String> = cookie_header_value
@@ -1574,30 +1733,57 @@ async fn login(username: String, password: String) -> Result<String, String> {
         .get(&account_info_url)
         .send()
         .await
-        .map_err(|e| format!("Failed to get account info: {}", e))?
+        .map_err(|e| {
+          let detailed_error = format_reqwest_error(&account_info_url, &e);
+          let error_msg = format!("Failed to get account info: {}", detailed_error);
+          let _ = log_error_to_file(&error_msg);
+          error_msg
+        })?
         .json()
         .await
-        .map_err(|e| format!("Failed to parse account info: {}", e))?;
+        .map_err(|e| {
+          let error_msg = format!("Failed to parse account info: {} (URL: {})", e, account_info_url);
+          let _ = log_error_to_file(&error_msg);
+          error_msg
+        })?;
 
     let auth_key_url = format!("{}/launcher/GetAuthKeyAction", base_url);
     let auth_key: AuthKeyResponse = client
         .get(&auth_key_url)
         .send()
         .await
-        .map_err(|e| format!("Failed to get auth key: {}", e))?
+        .map_err(|e| {
+          let detailed_error = format_reqwest_error(&auth_key_url, &e);
+          let error_msg = format!("Failed to get auth key: {}", detailed_error);
+          let _ = log_error_to_file(&error_msg);
+          error_msg
+        })?
         .json()
         .await
-        .map_err(|e| format!("Failed to parse auth key: {}", e))?;
+        .map_err(|e| {
+          let error_msg = format!("Failed to parse auth key: {} (URL: {})", e, auth_key_url);
+          let _ = log_error_to_file(&error_msg);
+          error_msg
+        })?;
 
     let char_count_url = format!("{}/launcher/GetCharacterCountAction", base_url);
     let char_count: CharCountResponse = client
         .get(&char_count_url)
         .send()
         .await
-        .map_err(|e| format!("Failed to get character count: {}", e))?
+        .map_err(|e| {
+          let detailed_error = format_reqwest_error(&char_count_url, &e);
+          let error_msg = format!("Failed to get character count: {}", detailed_error);
+          let _ = log_error_to_file(&error_msg);
+          error_msg
+        })?
         .json()
         .await
-        .map_err(|e| format!("Failed to parse character count: {}", e))?;
+        .map_err(|e| {
+          let error_msg = format!("Failed to parse character count: {} (URL: {})", e, char_count_url);
+          let _ = log_error_to_file(&error_msg);
+          error_msg
+        })?;
 
     // --- Step 4: GET /launcher/Main to extract ActsMap/PagesMap ---
     // Important: Add locale if the server requires it to serve localized pages.
@@ -1607,19 +1793,30 @@ async fn login(username: String, password: String) -> Result<String, String> {
         .get(&main_url)
         .send()
         .await
-        .map_err(|e| format!("Failed to get launcher main page: {}", e))?;
+        .map_err(|e| {
+          let detailed_error = format_reqwest_error(&main_url, &e);
+          let error_msg = format!("Failed to get launcher main page: {}", detailed_error);
+          let _ = log_error_to_file(&error_msg);
+          error_msg
+        })?;
 
     if !main_res.status().is_success() {
-        return Err(format!(
-            "Launcher main page request failed with status: {}",
-            main_res.status()
-        ));
+        let error_msg = format!(
+            "Launcher main page request failed with HTTP status: {} (URL: {})",
+            main_res.status(), main_url
+        );
+        let _ = log_error_to_file(&error_msg);
+        return Err(error_msg);
     }
 
     let main_html = main_res
         .text()
         .await
-        .map_err(|e| format!("Failed to read main page body: {}", e))?;
+        .map_err(|e| {
+          let error_msg = format!("Failed to read main page body: {} (URL: {})", e, main_url);
+          let _ = log_error_to_file(&error_msg);
+          error_msg
+        })?;
 
     // KEY STEP: Pass `base_url` so that `extract_maps_from_html` can rebuild the full URLs in ACTS_MAP.
     let (acts_map, pages_map) = extract_maps_from_html(&main_html, base_url)?;
@@ -1834,7 +2031,11 @@ async fn check_server_connection() -> Result<bool, String> {
   // Step 1: Validate that we have an authenticated session with complete credentials
   let auth_valid = {
     let auth_info = GLOBAL_AUTH_INFO.read()
-      .map_err(|e| format!("Failed to read auth info: {}", e))?;
+      .map_err(|e| {
+        let error_msg = format!("Failed to read auth info: {}", e);
+        let _ = log_error_to_file(&error_msg);
+        error_msg
+      })?;
     
     let is_complete = 
       !auth_info.auth_key.is_empty() &&
@@ -1843,12 +2044,15 @@ async fn check_server_connection() -> Result<bool, String> {
       !auth_info.character_count.is_empty();
     
     if !is_complete {
-      println!("Auth info incomplete: auth_key={}, user_no={}, user_name={}, char_count={}", 
+      let error_msg = format!(
+        "Auth info incomplete: auth_key={}, user_no={}, user_name={}, char_count={}", 
         !auth_info.auth_key.is_empty(),
         auth_info.user_no,
         !auth_info.user_name.is_empty(),
         !auth_info.character_count.is_empty()
       );
+      let _ = log_error_to_file(&error_msg);
+      println!("{}", error_msg);
       return Err("Authentication is incomplete. Please login again.".to_string());
     }
     
@@ -1857,7 +2061,9 @@ async fn check_server_connection() -> Result<bool, String> {
   };
   
   if !auth_valid {
-    return Err("Authentication validation failed".to_string());
+    let error_msg = "Authentication validation failed".to_string();
+    let _ = log_error_to_file(&error_msg);
+    return Err(error_msg);
   }
   
   // Step 2: Verify we have an authenticated HTTP client
@@ -1865,7 +2071,9 @@ async fn check_server_connection() -> Result<bool, String> {
   let client = match &*client_guard {
     Some(client) => client,
     None => {
-      println!("No authenticated HTTP client available");
+      let error_msg = "No authenticated HTTP client available".to_string();
+      let _ = log_error_to_file(&error_msg);
+      println!("{}", error_msg);
       return Err("No authenticated session found. Please login again.".to_string());
     }
   };
@@ -1880,20 +2088,37 @@ async fn check_server_connection() -> Result<bool, String> {
       println!("Server connection check: status {}", status);
       
       if status.is_success() {
+        info!("Server connection successful");
         Ok(true)
       } else if status.is_client_error() {
-        // 4xx errors might indicate auth issues
-        Err(format!("Server returned client error: {}", status))
+        let error_msg = format!(
+          "Server returned client error: {} (URL: {})",
+          status, hash_file_url
+        );
+        let _ = log_error_to_file(&error_msg);
+        Err(error_msg)
       } else if status.is_server_error() {
-        // 5xx errors indicate server issues
-        Err(format!("Server returned server error: {}", status))
+        let error_msg = format!(
+          "Server returned server error: {} (URL: {})",
+          status, hash_file_url
+        );
+        let _ = log_error_to_file(&error_msg);
+        Err(error_msg)
       } else {
-        Err(format!("Unexpected server response: {}", status))
+        let error_msg = format!(
+          "Unexpected server response: {} (URL: {})",
+          status, hash_file_url
+        );
+        let _ = log_error_to_file(&error_msg);
+        Err(error_msg)
       }
     },
     Err(e) => {
-      println!("Server connection check failed: {}", e);
-      Err(format!("Failed to connect to server: {}", e))
+      let detailed_error = format_reqwest_error(&hash_file_url, &e);
+      let error_msg = format!("Server connection check failed: {}", detailed_error);
+      let _ = log_error_to_file(&error_msg);
+      println!("{}", error_msg);
+      Err(error_msg)
     }
   }
 }
@@ -2110,23 +2335,45 @@ async fn check_launcher_update(app: tauri::AppHandle) -> Result<LauncherUpdateIn
     .get(&info_url)
     .send()
     .await
-    .map_err(|e| format!("Failed to fetch launcher_info.ini: {}", e))?;
+    .map_err(|e| {
+      let detailed_error = format_reqwest_error(&info_url, &e);
+      let error_msg = format!("Failed to fetch launcher_info.ini: {}", detailed_error);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   if !response.status().is_success() {
-    return Err(format!("Server returned {} for launcher_info.ini", response.status()));
+    let error_msg = format!(
+      "Server returned HTTP status {} for launcher_info.ini (URL: {})",
+      response.status(), info_url
+    );
+    let _ = log_error_to_file(&error_msg);
+    return Err(error_msg);
   }
 
   let text = response
     .text()
     .await
-    .map_err(|e| format!("Failed to read launcher_info.ini: {}", e))?;
+    .map_err(|e| {
+      let error_msg = format!("Failed to read launcher_info.ini: {} (URL: {})", e, info_url);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   let ini = Ini::load_from_str(&text)
-    .map_err(|e| format!("Failed to parse launcher_info.ini: {}", e))?;
+    .map_err(|e| {
+      let error_msg = format!("Failed to parse launcher_info.ini: {} (URL: {})", e, info_url);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   let section = ini
     .section(Some("LAUNCHER"))
-    .ok_or("Missing [LAUNCHER] section in launcher_info.ini")?;
+    .ok_or_else(|| {
+      let error_msg = "Missing [LAUNCHER] section in launcher_info.ini (URL: {})".to_string();
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   // Platform-specific version and binary keys.
   // New format:
@@ -2145,13 +2392,21 @@ async fn check_launcher_update(app: tauri::AppHandle) -> Result<LauncherUpdateIn
   let server_version = section
     .get(version_key)
     .or_else(|| section.get("version"))
-    .ok_or(format!("Missing '{}' (or 'version') key in launcher_info.ini", version_key))?
+    .ok_or_else(|| {
+      let error_msg = format!("Missing '{}' (or 'version') key in launcher_info.ini (URL: {})", version_key, info_url);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?
     .to_string();
 
   let bin_url = section
     .get(bin_key)
     .or_else(|| section.get("bin_url"))
-    .ok_or(format!("Missing '{}' (or 'bin_url') key in launcher_info.ini", bin_key))?
+    .ok_or_else(|| {
+      let error_msg = format!("Missing '{}' (or 'bin_url') key in launcher_info.ini (URL: {})", bin_key, info_url);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?
     .to_string();
 
   let autoupdater_url = section
@@ -2185,8 +2440,16 @@ async fn check_launcher_update(app: tauri::AppHandle) -> Result<LauncherUpdateIn
 /// if it isn't already present. Called silently in the background at startup.
 async fn ensure_autoupdater() -> Result<(), String> {
   let exe_path = std::env::current_exe()
-    .map_err(|e| format!("Failed to get exe path: {}", e))?;
-  let exe_dir = exe_path.parent().ok_or("Failed to get exe directory")?;
+    .map_err(|e| {
+      let error_msg = format!("Failed to get exe path: {}", e);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
+  let exe_dir = exe_path.parent().ok_or_else(|| {
+    let error_msg = "Failed to get exe directory".to_string();
+    let _ = log_error_to_file(&error_msg);
+    error_msg
+  })?;
   let autoupdater = exe_dir.join("autoupdater.exe");
 
   if autoupdater.exists() {
@@ -2202,13 +2465,26 @@ async fn ensure_autoupdater() -> Result<(), String> {
     .get(&info_url)
     .send()
     .await
-    .map_err(|e| format!("Failed to fetch launcher_info.ini: {}", e))?
+    .map_err(|e| {
+      let detailed_error = format_reqwest_error(&info_url, &e);
+      let error_msg = format!("Failed to fetch launcher_info.ini for autoupdater: {}", detailed_error);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?
     .text()
     .await
-    .map_err(|e| format!("Failed to read launcher_info.ini: {}", e))?;
+    .map_err(|e| {
+      let error_msg = format!("Failed to read launcher_info.ini for autoupdater: {} (URL: {})", e, info_url);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   let ini = Ini::load_from_str(&text)
-    .map_err(|e| format!("Failed to parse launcher_info.ini: {}", e))?;
+    .map_err(|e| {
+      let error_msg = format!("Failed to parse launcher_info.ini for autoupdater: {} (URL: {})", e, info_url);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   let autoupdater_url = ini
     .section(Some("LAUNCHER"))
@@ -2217,7 +2493,9 @@ async fn ensure_autoupdater() -> Result<(), String> {
     .to_string();
 
   if autoupdater_url.is_empty() {
-    return Err("launcher_info.ini has no autoupdater_url — skipping download.".to_string());
+    let error_msg = "launcher_info.ini has no autoupdater_url — skipping download.".to_string();
+    let _ = log_error_to_file(&error_msg);
+    return Err(error_msg);
   }
 
   info!("ensure_autoupdater: downloading from {}", autoupdater_url);
@@ -2226,20 +2504,38 @@ async fn ensure_autoupdater() -> Result<(), String> {
     .get(&autoupdater_url)
     .send()
     .await
-    .map_err(|e| format!("Failed to download autoupdater.exe: {}", e))?;
+    .map_err(|e| {
+      let detailed_error = format_reqwest_error(&autoupdater_url, &e);
+      let error_msg = format!("Failed to download autoupdater.exe: {}", detailed_error);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   if !resp.status().is_success() {
-    return Err(format!("autoupdater.exe download returned status {}", resp.status()));
+    let error_msg = format!(
+      "autoupdater.exe download returned HTTP status {} (URL: {})",
+      resp.status(), autoupdater_url
+    );
+    let _ = log_error_to_file(&error_msg);
+    return Err(error_msg);
   }
 
   let bytes = resp
     .bytes()
     .await
-    .map_err(|e| format!("Failed to read autoupdater.exe bytes: {}", e))?;
+    .map_err(|e| {
+      let error_msg = format!("Failed to read autoupdater.exe bytes: {} (URL: {})", e, autoupdater_url);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   tokio::fs::write(&autoupdater, &bytes)
     .await
-    .map_err(|e| format!("Failed to save autoupdater.exe: {}", e))?;
+    .map_err(|e| {
+      let error_msg = format!("Failed to save autoupdater.exe: {}", e);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   info!(
     "ensure_autoupdater: saved {} bytes to {}",
@@ -2266,10 +2562,18 @@ async fn apply_launcher_update(
 
   // ── 1. Resolve path to the launcher exe (this is the file we'll replace) ─
   let exe_path = std::env::current_exe()
-    .map_err(|e| format!("Failed to resolve launcher exe path: {}", e))?;
+    .map_err(|e| {
+      let error_msg = format!("Failed to resolve launcher exe path: {}", e);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
   let exe_dir = exe_path
     .parent()
-    .ok_or("Failed to get launcher directory")?;
+    .ok_or_else(|| {
+      let error_msg = "Failed to get launcher directory".to_string();
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   // ── 2. Ensure autoupdater.exe is present; download it if needed ──────────
   let autoupdater = exe_dir.join("autoupdater.exe");
@@ -2281,10 +2585,12 @@ async fn apply_launcher_update(
 
   if !autoupdater.exists() {
     if autoupdater_url.is_empty() {
-      return Err(format!(
+      let error_msg = format!(
         "autoupdater.exe not found at '{}'. Rebuild the launcher so autoupdater_url is passed, or place autoupdater.exe manually.",
         autoupdater.display()
-      ));
+      );
+      let _ = log_error_to_file(&error_msg);
+      return Err(error_msg);
     }
 
     info!("autoupdater.exe not found — downloading from {}", autoupdater_url);
@@ -2292,23 +2598,38 @@ async fn apply_launcher_update(
       .get(&autoupdater_url)
       .send()
       .await
-      .map_err(|e| format!("Failed to download autoupdater.exe: {}", e))?;
+      .map_err(|e| {
+        let detailed_error = format_reqwest_error(&autoupdater_url, &e);
+        let error_msg = format!("Failed to download autoupdater.exe: {}", detailed_error);
+        let _ = log_error_to_file(&error_msg);
+        error_msg
+      })?;
 
     if !au_response.status().is_success() {
-      return Err(format!(
-        "autoupdater.exe download failed with status: {}",
-        au_response.status()
-      ));
+      let error_msg = format!(
+        "autoupdater.exe download failed with HTTP status: {} (URL: {})",
+        au_response.status(), autoupdater_url
+      );
+      let _ = log_error_to_file(&error_msg);
+      return Err(error_msg);
     }
 
     let au_bytes = au_response
       .bytes()
       .await
-      .map_err(|e| format!("Failed to read autoupdater.exe response: {}", e))?;
+      .map_err(|e| {
+        let error_msg = format!("Failed to read autoupdater.exe response: {} (URL: {})", e, autoupdater_url);
+        let _ = log_error_to_file(&error_msg);
+        error_msg
+      })?;
 
     tokio::fs::write(&autoupdater, &au_bytes)
       .await
-      .map_err(|e| format!("Failed to save autoupdater.exe: {}", e))?;
+      .map_err(|e| {
+        let error_msg = format!("Failed to save autoupdater.exe: {}", e);
+        let _ = log_error_to_file(&error_msg);
+        error_msg
+      })?;
 
     info!("autoupdater.exe downloaded successfully");
   }
@@ -2318,17 +2639,31 @@ async fn apply_launcher_update(
     .get(&bin_url)
     .send()
     .await
-    .map_err(|e| format!("Failed to start launcher download: {}", e))?;
+    .map_err(|e| {
+      let detailed_error = format_reqwest_error(&bin_url, &e);
+      let error_msg = format!("Failed to start launcher download: {}", detailed_error);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   if !response.status().is_success() {
-    return Err(format!("Launcher download failed with status: {}", response.status()));
+    let error_msg = format!(
+      "Launcher download failed with HTTP status: {} (URL: {})",
+      response.status(), bin_url
+    );
+    let _ = log_error_to_file(&error_msg);
+    return Err(error_msg);
   }
 
   let total_size = response.content_length().unwrap_or(0);
 
   let temp_dir = std::env::temp_dir().join("launcher_update");
   fs::create_dir_all(&temp_dir)
-    .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+    .map_err(|e| {
+      let error_msg = format!("Failed to create temp directory: {}", e);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   let filename = bin_url
     .split('/')
@@ -2340,17 +2675,29 @@ async fn apply_launcher_update(
 
   let mut dest = tokio::fs::File::create(&new_launcher_path)
     .await
-    .map_err(|e| format!("Failed to create temp launcher file: {}", e))?;
+    .map_err(|e| {
+      let error_msg = format!("Failed to create temp launcher file: {}", e);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
 
   let mut downloaded: u64 = 0;
   let mut stream = response.bytes_stream();
 
   while let Some(chunk) = stream.next().await {
-    let chunk = chunk.map_err(|e| format!("Download stream error: {}", e))?;
+    let chunk = chunk.map_err(|e| {
+      let error_msg = format!("Download stream error: {}", e);
+      let _ = log_error_to_file(&error_msg);
+      error_msg
+    })?;
     dest
       .write_all(&chunk)
       .await
-      .map_err(|e| format!("Failed to write chunk: {}", e))?;
+      .map_err(|e| {
+        let error_msg = format!("Failed to write chunk: {}", e);
+        let _ = log_error_to_file(&error_msg);
+        error_msg
+      })?;
     downloaded += chunk.len() as u64;
 
     let progress = if total_size > 0 {
@@ -2365,7 +2712,11 @@ async fn apply_launcher_update(
     );
   }
 
-  dest.flush().await.map_err(|e| format!("Failed to flush temp launcher file: {}", e))?;
+  dest.flush().await.map_err(|e| {
+    let error_msg = format!("Failed to flush temp launcher file: {}", e);
+    let _ = log_error_to_file(&error_msg);
+    error_msg
+  })?;
   drop(dest);
 
   // ── 4. Get current PID so autoupdater can wait for us to exit ─────────────
@@ -2379,7 +2730,12 @@ async fn apply_launcher_update(
       .get(&bridge_url)
       .send()
       .await
-      .map_err(|e| format!("Failed to download launcher-bridge.exe: {}", e))?;
+      .map_err(|e| {
+        let detailed_error = format_reqwest_error(&bridge_url, &e);
+        let error_msg = format!("Failed to download launcher-bridge.exe: {}", detailed_error);
+        let _ = log_error_to_file(&error_msg);
+        error_msg
+      })?;
 
     if !bridge_resp.status().is_success() {
       return Err(format!("launcher-bridge.exe download failed with status: {}", bridge_resp.status()));
