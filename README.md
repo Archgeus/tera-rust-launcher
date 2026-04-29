@@ -347,6 +347,25 @@ The plugin is automatically discovered and loaded from `src/plugins/tera-rust-la
 
 The plugin exposes `/GetPortalConfig` and the launcher uses it to know when SignUp and Captcha are enabled/disabled based on the TERA Api configuration.
 
+## WebLink Configuration
+
+Configure external URLs in `src-tauri/WebLink.json`:
+
+```json
+{
+  "WebUrl": "https://your-website.com",
+  "DiscordUrl": "https://discord.gg/your-server",
+  "SupportUrl": "https://support.your-domain.com"
+}
+```
+
+**Fields:**
+- **WebUrl** - Main website link
+- **DiscordUrl** - Discord server invite
+- **SupportUrl** - Support/documentation page
+
+Update URLs before building. Changes apply to launcher links and buttons.
+
 ## Note
 This launcher is a custom solution and not officially associated with Tera Online or its publishers.
 

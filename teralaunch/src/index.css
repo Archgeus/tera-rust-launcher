@@ -1502,17 +1502,50 @@ input[type="text"]::placeholder {
   cursor: pointer;
 }
 
-/* ─── Launcher version display – bottom-left ──────────────────────────────── */
-.launcher-version-display {
+/* ─── Launcher footer – bottom full width ──────────────────────────────────── */
+.launcher-footer-display {
   position: absolute;
   bottom: 8px;
   left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   font-size: 11px;
   font-family: Raleway, sans-serif;
   font-weight: 600;
   color: rgba(255, 255, 255, 0.28);
   letter-spacing: 0.6px;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.launcher-version {
+  color: rgba(255, 255, 255, 0.28);
   pointer-events: none;
+}
+
+.launcher-links {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: auto;
+}
+
+.launcher-link {
+  color: rgba(255, 255, 255, 0.28);
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.launcher-link:hover {
+  color: rgba(255, 255, 255, 0.6);
+  text-decoration: underline;
+}
+
+.launcher-link-separator {
+  color: rgba(255, 255, 255, 0.15);
   user-select: none;
 }
 

@@ -220,6 +220,13 @@ struct GetFilesToUpdateParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+struct LauncherUrls {
+  web_url: String,
+  discord_url: String,
+  support_url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct CachedFileInfo {
   hash: String,
   last_modified: SystemTime,
@@ -2322,6 +2329,36 @@ fn get_launcher_version(app: tauri::AppHandle) -> Result<String, String> {
   read_or_create_launcher_version(&compiled)
 }
 
+/// Retrieve launcher configuration URLs embedded from WebLink.json
+#[tauri::command]
+fn get_launcher_urls() -> Result<LauncherUrls, String> {
+  const WEBLINK: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/WebLink.json"));
+
+  let config: serde_json::Value = serde_json::from_str(WEBLINK)
+    .map_err(|e| format!("Failed to parse WebLink.json: {}", e))?;
+
+  let web_url = config.get("WebUrl")
+    .and_then(|v| v.as_str())
+    .unwrap_or("")
+    .to_string();
+
+  let discord_url = config.get("DiscordUrl")
+    .and_then(|v| v.as_str())
+    .unwrap_or("")
+    .to_string();
+
+  let support_url = config.get("SupportUrl")
+    .and_then(|v| v.as_str())
+    .unwrap_or("")
+    .to_string();
+
+  Ok(LauncherUrls {
+    web_url,
+    discord_url,
+    support_url,
+  })
+}
+
 /// Fetch `{LAUNCHER_ACTION_URL}/public/patch/launcher_info.ini`, parse the
 /// [LAUNCHER] section and compare with the local `launcher_version.ini`.
 /// Creates `launcher_version.ini` from the compiled version if it does not exist.
@@ -3047,6 +3084,7 @@ fn main() {
         check_launcher_update,
         apply_launcher_update,
         get_launcher_version,
+        get_launcher_urls,
         init_signup_session,
         get_captcha,
         verify_captcha,

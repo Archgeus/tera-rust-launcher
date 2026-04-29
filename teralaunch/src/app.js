@@ -180,6 +180,7 @@ const App = {
       // Also starts the 5-minute periodic check.
       this.checkLauncherUpdateOnStartup();
       this.loadLauncherVersion();
+      this.loadLauncherUrls();
       await this.loadPortalConfig();
 
       listen("maintenance_active", (event) => {
@@ -3576,6 +3577,28 @@ const App = {
     }
   },
 
+  async loadLauncherUrls() {
+    try {
+      const urls = await invoke('get_launcher_urls');
+
+      const bind = (id, url) => {
+        const el = document.getElementById(id);
+        if (el && url) {
+          el.addEventListener('click', (e) => {
+            e.preventDefault();
+            window.__TAURI__.shell.open(url);
+          });
+        }
+      };
+
+      bind('link-website', urls.web_url);
+      bind('link-discord', urls.discord_url);
+      bind('link-support', urls.support_url);
+    } catch (e) {
+      console.warn('Failed to load launcher URLs:', e);
+    }
+  },
+
   /**
    * Shows the launcher update confirmation modal (used when the user manually
    * clicks the red heartbeat button during a session).
@@ -3654,7 +3677,7 @@ const App = {
 
     try {
       await invoke('apply_launcher_update', {
-        installerUrl,
+        binUrl: installerUrl,
         autoupdaterUrl,
         newVersion,
         bridgeUrl,
