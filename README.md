@@ -133,9 +133,7 @@ npm run tauri build
 
 **Linux:**
 ```bash
-cd teralaunch
-npm install
-npm run tauri build
+cargo build --release -p TeraLauncher
 # Output binary: teralaunch/src-tauri/target/release/TeraLauncher
 # (native Linux binary using WebKitGTK — no Wine needed for the launcher itself)
 ```
